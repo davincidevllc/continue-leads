@@ -13,16 +13,17 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "express": "^4.21.0",
-    "cors": "^2.8.5",
+    "@continue-leads/db": "workspace:*",
     "@continue-leads/shared": "workspace:*",
-    "@continue-leads/db": "workspace:*"
+    "cors": "^2.8.5",
+    "express": "^4.21.0"
   },
   "devDependencies": {
-    "@types/express": "^5.0.0",
     "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^25.2.3",
+    "ts-node": "^10.9.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0",
-    "ts-node": "^10.9.0"
+    "vitest": "^3.0.0"
   }
 }

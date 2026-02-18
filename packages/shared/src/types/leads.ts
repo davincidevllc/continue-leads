@@ -6,7 +6,7 @@ import {
   ProjectSizeBucket,
   BudgetRange,
   TargetingMode,
-} from './enums';
+} from '../enums';
 
 // ─── Lead Record (application-layer read model) ───
 

@@ -13,12 +13,13 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@continue-leads/shared": "workspace:*",
-    "@continue-leads/db": "workspace:*"
+    "@continue-leads/db": "workspace:*",
+    "@continue-leads/shared": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "^25.2.3",
+    "ts-node": "^10.9.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0",
-    "ts-node": "^10.9.0"
+    "vitest": "^3.0.0"
   }
 }
