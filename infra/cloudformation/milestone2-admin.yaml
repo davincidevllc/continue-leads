@@ -1,0 +1,292 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Continue Leads - Milestone 2: Admin Dashboard
+  ALB, ECR, ECS Service for Next.js admin app.
+  Additive to cl-staging stack (Milestone 1).
+
+Parameters:
+  # ── From Milestone 1 stack outputs ──
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID from cl-staging stack
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet 1 (for ALB)
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet 2 (for ALB)
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet 1 (for ECS tasks)
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet 2 (for ECS tasks)
+
+  EcsClusterArn:
+    Type: String
+    Description: ECS Cluster ARN from cl-staging stack
+
+  AppSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: App security group from cl-staging (has DB access)
+
+  DbSecretArn:
+    Type: String
+    Description: Secrets Manager ARN for DB credentials
+
+  AppSecretArn:
+    Type: String
+    Description: Secrets Manager ARN for app secrets (contains ADMIN_AUTH_SECRET)
+
+  RdsEndpoint:
+    Type: String
+    Description: RDS endpoint hostname
+
+  RdsPort:
+    Type: String
+    Default: '5432'
+
+  DbName:
+    Type: String
+    Default: continueleads
+
+  AdminAuthSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Password for admin login (same value as in Secrets Manager)
+
+Resources:
+
+  # ── ECR Repository ──
+  AdminEcrRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: cl-stg-admin
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "description": "Keep last 10 images",
+              "selection": {
+                "tagStatus": "any",
+                "countType": "imageCountMoreThan",
+                "countNumber": 10
+              },
+              "action": { "type": "expire" }
+            }]
+          }
+
+  # ── ALB Security Group (public HTTP) ──
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: cl-stg-alb-sg
+      GroupDescription: ALB - allow HTTP from internet
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: cl-stg-alb-sg
+
+  # Allow ALB → ECS tasks on port 3000
+  AppFromAlbIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AppSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 3000
+      ToPort: 3000
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+
+  # ── Application Load Balancer ──
+  AdminAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: cl-stg-admin-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: cl-stg-admin-alb
+
+  AdminTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: cl-stg-admin-tg
+      Port: 3000
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /login
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+
+  AdminListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref AdminAlb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AdminTargetGroup
+
+  # ── CloudWatch Log Group ──
+  AdminLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/cl-stg-admin
+      RetentionInDays: 14
+
+  # ── ECS Task Execution Role ──
+  AdminTaskExecRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cl-stg-admin-exec-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: secrets-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref DbSecretArn
+                  - !Ref AppSecretArn
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: '*'
+
+  # ── ECS Task Role (what the container can do) ──
+  AdminTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cl-stg-admin-task-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  # ── ECS Task Definition ──
+  AdminTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: cl-stg-admin
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt AdminTaskExecRole.Arn
+      TaskRoleArn: !GetAtt AdminTaskRole.Arn
+      ContainerDefinitions:
+        - Name: admin
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cl-stg-admin:latest'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 3000
+              Protocol: tcp
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: PORT
+              Value: '3000'
+            - Name: DB_HOST
+              Value: !Ref RdsEndpoint
+            - Name: DB_PORT
+              Value: !Ref RdsPort
+            - Name: DB_NAME
+              Value: !Ref DbName
+            - Name: DB_USER
+              Value: cladmin
+            - Name: ADMIN_AUTH_SECRET
+              Value: !Ref AdminAuthSecret
+          Secrets:
+            - Name: DB_PASSWORD
+              ValueFrom: !Sub '${DbSecretArn}:password::'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/cl-stg-admin
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: admin
+
+  # ── ECS Service ──
+  AdminService:
+    Type: AWS::ECS::Service
+    DependsOn: AdminListener
+    Properties:
+      ServiceName: cl-stg-admin
+      Cluster: !Ref EcsClusterArn
+      TaskDefinition: !Ref AdminTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref AppSecurityGroupId
+      LoadBalancers:
+        - ContainerName: admin
+          ContainerPort: 3000
+          TargetGroupArn: !Ref AdminTargetGroup
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+
+Outputs:
+  AdminUrl:
+    Description: Admin dashboard URL (ALB DNS)
+    Value: !Sub 'http://${AdminAlb.DNSName}'
+
+  EcrRepoUri:
+    Description: ECR repository URI for admin image
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cl-stg-admin'
+
+  AlbDnsName:
+    Description: ALB DNS name
+    Value: !GetAtt AdminAlb.DNSName
+
+  TargetGroupArn:
+    Description: Target group ARN
+    Value: !Ref AdminTargetGroup
