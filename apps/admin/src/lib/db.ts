@@ -1,18 +1,32 @@
-import { query, queryOne } from '@continue-leads/db';
+import { Pool } from 'pg';
+
+const pool = new Pool({
+  host: process.env.DB_HOST || 'localhost',
+  port: parseInt(process.env.DB_PORT || '5432', 10),
+  database: process.env.DB_NAME || 'continueleads',
+  user: process.env.DB_USER || 'postgres',
+  password: process.env.DB_PASSWORD || '',
+  max: 5,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+});
+
+async function query<T = Record<string, unknown>>(text: string, params?: unknown[]): Promise<T[]> {
+  const result = await pool.query(text, params);
+  return result.rows as T[];
+}
+
+async function queryOne<T = Record<string, unknown>>(text: string, params?: unknown[]): Promise<T | null> {
+  const rows = await query<T>(text, params);
+  return rows[0] ?? null;
+}
 
 // ─── Metros ───
 
 export interface MetroRow {
-  id: string;
-  name: string;
-  state: string;
-  slug: string;
-  is_active: boolean;
-  priority: number;
-  facts: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-  site_count?: number;
+  id: string; name: string; state: string; slug: string;
+  is_active: boolean; priority: number; facts: Record<string, unknown>;
+  created_at: string; updated_at: string; site_count?: number;
 }
 
 export async function listMetros(): Promise<MetroRow[]> {
@@ -59,16 +73,9 @@ export async function updateMetro(id: string, data: Partial<{
 // ─── Verticals ───
 
 export interface VerticalRow {
-  id: string;
-  name: string;
-  slug: string;
-  dedupe_window_days: number;
-  required_fields: Record<string, boolean>;
-  is_active: boolean;
-  created_at: string;
-  updated_at: string;
-  service_count?: number;
-  lead_count?: number;
+  id: string; name: string; slug: string; dedupe_window_days: number;
+  required_fields: Record<string, boolean>; is_active: boolean;
+  created_at: string; updated_at: string; service_count?: number; lead_count?: number;
 }
 
 export async function listVerticals(): Promise<VerticalRow[]> {
@@ -100,16 +107,11 @@ export async function updateVertical(id: string, data: Partial<{
   return queryOne<VerticalRow>(`UPDATE verticals SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`, vals);
 }
 
-// ─── Services (read-only for now) ───
+// ─── Services ───
 
 export interface ServiceRow {
-  id: string;
-  name: string;
-  slug: string;
-  category_id: string;
-  vertical_name: string;
-  vertical_slug: string;
-  is_active: boolean;
+  id: string; name: string; slug: string; category_id: string;
+  vertical_name: string; vertical_slug: string; is_active: boolean;
 }
 
 export async function listServices(): Promise<ServiceRow[]> {
@@ -125,19 +127,10 @@ export async function listServices(): Promise<ServiceRow[]> {
 // ─── Sites ───
 
 export interface SiteRow {
-  id: string;
-  domain: string;
-  vertical_id: string;
-  vertical_name?: string;
-  template_id: string;
-  template_name?: string;
-  status: string;
-  style_seed: string;
-  config: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-  metro_count?: number;
-  lead_count?: number;
+  id: string; domain: string; vertical_id: string; vertical_name?: string;
+  template_id: string; template_name?: string; status: string;
+  style_seed: string; config: Record<string, unknown>;
+  created_at: string; updated_at: string; metro_count?: number; lead_count?: number;
 }
 
 export async function listSites(filters?: {
@@ -152,7 +145,6 @@ export async function listSites(filters?: {
   const where = wheres.length ? 'WHERE ' + wheres.join(' AND ') : '';
   const limit = filters?.limit ?? 50;
   const offset = filters?.offset ?? 0;
-
   const countResult = await queryOne<{ count: number }>(`SELECT COUNT(*)::int AS count FROM sites s ${where}`, vals);
   const rows = await query<SiteRow>(
     `SELECT s.*, v.name AS vertical_name, t.name AS template_name,
@@ -171,9 +163,7 @@ export async function listSites(filters?: {
 export async function getSite(id: string): Promise<SiteRow | null> {
   return queryOne<SiteRow>(`
     SELECT s.*, v.name AS vertical_name, t.name AS template_name
-    FROM sites s
-    LEFT JOIN verticals v ON s.vertical_id = v.id
-    LEFT JOIN templates t ON s.template_id = t.id
+    FROM sites s LEFT JOIN verticals v ON s.vertical_id = v.id LEFT JOIN templates t ON s.template_id = t.id
     WHERE s.id = $1
   `, [id]);
 }
@@ -213,10 +203,7 @@ export async function updateSite(id: string, data: Partial<{
 
 export async function getSiteMetros(siteId: string): Promise<MetroRow[]> {
   return query<MetroRow>(`
-    SELECT m.* FROM metros m
-    JOIN site_metros sm ON sm.metro_id = m.id
-    WHERE sm.site_id = $1
-    ORDER BY m.priority
+    SELECT m.* FROM metros m JOIN site_metros sm ON sm.metro_id = m.id WHERE sm.site_id = $1 ORDER BY m.priority
   `, [siteId]);
 }
 
@@ -229,12 +216,7 @@ export async function setSiteMetros(siteId: string, metroIds: string[]): Promise
 
 // ─── Templates ───
 
-export interface TemplateRow {
-  id: string;
-  name: string;
-  description: string;
-  is_active: boolean;
-}
+export interface TemplateRow { id: string; name: string; description: string; is_active: boolean; }
 
 export async function listTemplates(): Promise<TemplateRow[]> {
   return query<TemplateRow>('SELECT id, name, description, is_active FROM templates ORDER BY name');
@@ -243,30 +225,16 @@ export async function listTemplates(): Promise<TemplateRow[]> {
 // ─── Leads ───
 
 export interface LeadRow {
-  id: string;
-  site_id: string | null;
-  status: string;
-  rejection_reason: string | null;
-  dedupe_hit: boolean;
-  category_id: string | null;
-  service_id: string | null;
-  urgency: string | null;
-  property_type: string | null;
-  metro_slug: string | null;
-  zip: string | null;
-  created_at: string;
-  updated_at: string;
-  // Joined fields
-  domain?: string;
-  vertical_name?: string;
-  metro_name?: string;
-  phone_last4?: string;
+  id: string; site_id: string | null; status: string; rejection_reason: string | null;
+  dedupe_hit: boolean; category_id: string | null; service_id: string | null;
+  urgency: string | null; property_type: string | null; metro_slug: string | null;
+  zip: string | null; created_at: string; updated_at: string;
+  domain?: string; vertical_name?: string; metro_name?: string; phone_last4?: string;
 }
 
 export async function listLeads(filters?: {
   status?: string; vertical_id?: string; metro_slug?: string;
-  date_from?: string; date_to?: string;
-  search?: string; limit?: number; offset?: number;
+  date_from?: string; date_to?: string; search?: string; limit?: number; offset?: number;
 }): Promise<{ rows: LeadRow[]; total: number }> {
   const wheres: string[] = [];
   const vals: unknown[] = [];
@@ -280,7 +248,6 @@ export async function listLeads(filters?: {
   const where = wheres.length ? 'WHERE ' + wheres.join(' AND ') : '';
   const limit = filters?.limit ?? 50;
   const offset = filters?.offset ?? 0;
-
   const countResult = await queryOne<{ count: number }>(
     `SELECT COUNT(*)::int AS count FROM leads l 
      LEFT JOIN sites s ON l.site_id = s.id
@@ -305,44 +272,28 @@ export async function listLeads(filters?: {
 export async function getLead(id: string): Promise<LeadRow | null> {
   return queryOne<LeadRow>(`
     SELECT l.*, s.domain, v.name AS vertical_name, m.name AS metro_name
-    FROM leads l
-    LEFT JOIN sites s ON l.site_id = s.id
-    LEFT JOIN categories c ON l.category_id = c.id
-    LEFT JOIN verticals v ON c.vertical_id = v.id
-    LEFT JOIN metros m ON m.slug = l.metro_slug
-    WHERE l.id = $1
+    FROM leads l LEFT JOIN sites s ON l.site_id = s.id
+    LEFT JOIN categories c ON l.category_id = c.id LEFT JOIN verticals v ON c.vertical_id = v.id
+    LEFT JOIN metros m ON m.slug = l.metro_slug WHERE l.id = $1
   `, [id]);
 }
 
-export interface LeadDetailRow {
-  responses: Record<string, unknown>;
-}
-
+export interface LeadDetailRow { responses: Record<string, unknown>; }
 export async function getLeadDetails(leadId: string): Promise<LeadDetailRow | null> {
   return queryOne<LeadDetailRow>('SELECT responses FROM lead_details WHERE lead_id = $1', [leadId]);
 }
 
 export interface LeadEventRow {
-  id: string;
-  from_status: string | null;
-  to_status: string;
-  reason: string | null;
-  created_at: string;
+  id: string; from_status: string | null; to_status: string; reason: string | null; created_at: string;
 }
-
 export async function getLeadEvents(leadId: string): Promise<LeadEventRow[]> {
-  return query<LeadEventRow>(
-    'SELECT * FROM lead_status_events WHERE lead_id = $1 ORDER BY created_at ASC', [leadId]
-  );
+  return query<LeadEventRow>('SELECT * FROM lead_status_events WHERE lead_id = $1 ORDER BY created_at ASC', [leadId]);
 }
 
-// ─── Dashboard Stats ───
+// ─── Dashboard ───
 
 export interface DashboardStats {
-  total_leads: number;
-  leads_today: number;
-  total_sites: number;
-  active_metros: number;
+  total_leads: number; leads_today: number; total_sites: number; active_metros: number;
   leads_by_status: { status: string; count: number }[];
   leads_by_vertical: { name: string; count: number }[];
   recent_leads: LeadRow[];
@@ -350,33 +301,17 @@ export interface DashboardStats {
 
 export async function getDashboardStats(): Promise<DashboardStats> {
   const [totalLeads] = await query<{ count: number }>('SELECT COUNT(*)::int AS count FROM leads');
-  const [leadsToday] = await query<{ count: number }>(
-    "SELECT COUNT(*)::int AS count FROM leads WHERE created_at >= CURRENT_DATE"
-  );
+  const [leadsToday] = await query<{ count: number }>("SELECT COUNT(*)::int AS count FROM leads WHERE created_at >= CURRENT_DATE");
   const [totalSites] = await query<{ count: number }>('SELECT COUNT(*)::int AS count FROM sites');
-  const [activeMetros] = await query<{ count: number }>(
-    'SELECT COUNT(*)::int AS count FROM metros WHERE is_active = true'
-  );
-  const leadsByStatus = await query<{ status: string; count: number }>(
-    'SELECT status, COUNT(*)::int AS count FROM leads GROUP BY status ORDER BY count DESC'
-  );
+  const [activeMetros] = await query<{ count: number }>('SELECT COUNT(*)::int AS count FROM metros WHERE is_active = true');
+  const leadsByStatus = await query<{ status: string; count: number }>('SELECT status, COUNT(*)::int AS count FROM leads GROUP BY status ORDER BY count DESC');
   const leadsByVertical = await query<{ name: string; count: number }>(
-    `SELECT v.name, COUNT(l.id)::int AS count
-     FROM leads l JOIN categories c ON l.category_id = c.id JOIN verticals v ON c.vertical_id = v.id
-     GROUP BY v.name ORDER BY count DESC`
+    `SELECT v.name, COUNT(l.id)::int AS count FROM leads l JOIN categories c ON l.category_id = c.id JOIN verticals v ON c.vertical_id = v.id GROUP BY v.name ORDER BY count DESC`
   );
-  const recentLeads = await query<LeadRow>(
-    `SELECT l.*, s.domain FROM leads l LEFT JOIN sites s ON l.site_id = s.id
-     ORDER BY l.created_at DESC LIMIT 10`
-  );
-
+  const recentLeads = await query<LeadRow>(`SELECT l.*, s.domain FROM leads l LEFT JOIN sites s ON l.site_id = s.id ORDER BY l.created_at DESC LIMIT 10`);
   return {
-    total_leads: totalLeads?.count ?? 0,
-    leads_today: leadsToday?.count ?? 0,
-    total_sites: totalSites?.count ?? 0,
-    active_metros: activeMetros?.count ?? 0,
-    leads_by_status: leadsByStatus,
-    leads_by_vertical: leadsByVertical,
-    recent_leads: recentLeads,
+    total_leads: totalLeads?.count ?? 0, leads_today: leadsToday?.count ?? 0,
+    total_sites: totalSites?.count ?? 0, active_metros: activeMetros?.count ?? 0,
+    leads_by_status: leadsByStatus, leads_by_vertical: leadsByVertical, recent_leads: recentLeads,
   };
 }
