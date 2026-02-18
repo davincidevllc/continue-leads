@@ -14,10 +14,11 @@
     "seed": "node dist/seed.js"
   },
   "dependencies": {
-    "pg": "^8.13.0",
-    "@continue-leads/shared": "workspace:*"
+    "@continue-leads/shared": "workspace:*",
+    "pg": "^8.13.0"
   },
   "devDependencies": {
+    "@types/node": "^25.2.3",
     "@types/pg": "^8.11.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
