@@ -1,0 +1,758 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Continue Leads - Milestone 1 Staging Infrastructure
+  VPC, RDS Postgres, KMS, Secrets Manager, ECS Fargate baseline, S3 for sites.
+  Region: us-east-1 | Naming: cl-stg-*
+
+Parameters:
+  Environment:
+    Type: String
+    Default: staging
+    AllowedValues: [staging, production]
+
+  DBMasterUsername:
+    Type: String
+    Default: cladmin
+    Description: RDS master username
+
+  DBMasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    Description: RDS master password (min 12 chars, use letters + numbers + symbols)
+
+  DBName:
+    Type: String
+    Default: continueleads
+
+  AdminAuthSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Secret key for admin app JWT/session auth
+
+  AccountId:
+    Type: String
+    Default: '768499314735'
+    Description: AWS Account ID (for KMS policy)
+
+Mappings:
+  EnvConfig:
+    staging:
+      Prefix: cl-stg
+      DBInstanceClass: db.t3.micro
+      DBAllocatedStorage: 20
+      DBBackupRetention: 3
+    production:
+      Prefix: cl-prod
+      DBInstanceClass: db.t3.small
+      DBAllocatedStorage: 50
+      DBBackupRetention: 7
+
+Resources:
+
+  # ============================================================
+  # STEP 1: VPC + Networking
+  # ============================================================
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-vpc'
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: Thiago
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-igw'
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # --- Public Subnets (2 AZs) ---
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-public-1'
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-public-2'
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # --- NAT Gateway (single, cost-optimized for staging) ---
+
+  NATElasticIP:
+    Type: AWS::EC2::EIP
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-nat-eip'
+        - Key: Project
+          Value: ContinueLeads
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATElasticIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-nat'
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- Private Subnets (2 AZs) ---
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-private-1'
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-private-2'
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-private-rt'
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ============================================================
+  # STEP 2: Security Groups
+  # ============================================================
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ECS tasks (admin, ingestion, pingpost)
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+          Description: Admin app (Next.js)
+        - IpProtocol: tcp
+          FromPort: 3001
+          ToPort: 3001
+          CidrIp: 0.0.0.0/0
+          Description: Ingestion service
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-app-sg'
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS Postgres - only accessible from app SG
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+          Description: Postgres from ECS tasks only
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-db-sg'
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # STEP 3: RDS Postgres
+  # ============================================================
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for RDS
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub
+        - '${Prefix}-db'
+        - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+      Engine: postgres
+      EngineVersion: '16.4'
+      DBInstanceClass: !FindInMap [EnvConfig, !Ref Environment, DBInstanceClass]
+      AllocatedStorage: !FindInMap [EnvConfig, !Ref Environment, DBAllocatedStorage]
+      StorageType: gp3
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      PubliclyAccessible: false
+      BackupRetentionPeriod: !FindInMap [EnvConfig, !Ref Environment, DBBackupRetention]
+      MultiAZ: false
+      StorageEncrypted: true
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: !Sub
+            - '${Prefix}-db'
+            - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: Thiago
+
+  # ============================================================
+  # STEP 4: KMS Key for PII Encryption
+  # ============================================================
+
+  PIIEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Encryption key for Continue Leads PII data (phone, email)
+      Enabled: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowRootAccountFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowAdminUserManagement
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AccountId}:user/thiago-admin'
+            Action:
+              - 'kms:Create*'
+              - 'kms:Describe*'
+              - 'kms:Enable*'
+              - 'kms:List*'
+              - 'kms:Put*'
+              - 'kms:Update*'
+              - 'kms:Revoke*'
+              - 'kms:Disable*'
+              - 'kms:Get*'
+              - 'kms:Delete*'
+              - 'kms:TagResource'
+              - 'kms:UntagResource'
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:CancelKeyDeletion'
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:GenerateDataKeyWithoutPlaintext'
+            Resource: '*'
+      Tags:
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  PIIEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub
+        - 'alias/${Prefix}-pii'
+        - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+      TargetKeyId: !Ref PIIEncryptionKey
+
+  # ============================================================
+  # STEP 5: Secrets Manager
+  # ============================================================
+
+  DBCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    DependsOn: RDSInstance
+    Properties:
+      Name: !Sub
+        - '${Prefix}-db-credentials'
+        - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+      Description: RDS connection credentials for Continue Leads
+      SecretString: !Sub
+        - |
+          {
+            "host": "${DBHost}",
+            "port": 5432,
+            "dbname": "${DBName}",
+            "username": "${DBMasterUsername}",
+            "password": "${DBMasterPassword}"
+          }
+        - DBHost: !GetAtt RDSInstance.Endpoint.Address
+      Tags:
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  AppSecretsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub
+        - '${Prefix}-app-secrets'
+        - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+      Description: Application secrets (auth, API keys)
+      SecretString: !Sub
+        - |
+          {
+            "adminAuthSecret": "${AdminAuthSecret}",
+            "kmsKeyId": "${KMSKeyId}"
+          }
+        - KMSKeyId: !Ref PIIEncryptionKey
+      Tags:
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # STEP 6: ECS Fargate Baseline
+  # ============================================================
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub
+        - '${Prefix}-cluster'
+        - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+      ClusterSettings:
+        - Name: containerInsights
+          Value: disabled
+      Tags:
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Task execution role (pull images from ECR, write to CloudWatch Logs)
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub
+        - '${Prefix}-ecs-task-execution'
+        - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource:
+                  - !Ref DBCredentialsSecret
+                  - !Ref AppSecretsSecret
+      Tags:
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Task role (what the running container can do)
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub
+        - '${Prefix}-ecs-task-role'
+        - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: KMSAccess
+                Effect: Allow
+                Action:
+                  - 'kms:Encrypt'
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey'
+                  - 'kms:GenerateDataKeyWithoutPlaintext'
+                Resource: !GetAtt PIIEncryptionKey.Arn
+              - Sid: SecretsAccess
+                Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource:
+                  - !Ref DBCredentialsSecret
+                  - !Ref AppSecretsSecret
+              - Sid: S3SitesAccess
+                Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !GetAtt SitesBucket.Arn
+                  - !Sub '${SitesBucket.Arn}/*'
+      Tags:
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudWatch Log Groups
+  AdminLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub
+        - '/ecs/${Prefix}-admin'
+        - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  IngestionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub
+        - '/ecs/${Prefix}-ingestion'
+        - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  PingpostLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub
+        - '/ecs/${Prefix}-pingpost'
+        - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # STEP 7: S3 Bucket for Static Sites
+  # ============================================================
+
+  SitesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub
+        - '${Prefix}-sites-${AccountId}'
+        - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Project
+          Value: ContinueLeads
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudFront Origin Access Control (for secure S3 access)
+  SitesOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub
+          - '${Prefix}-sites-oac'
+          - Prefix: !FindInMap [EnvConfig, !Ref Environment, Prefix]
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # S3 bucket policy allowing CloudFront access
+  SitesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SitesBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipal
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${SitesBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                'AWS:SourceArn': !Sub 'arn:aws:cloudfront::${AccountId}:distribution/*'
+
+# ============================================================
+# OUTPUTS (needed for Milestone 2+)
+# ============================================================
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${Environment}-VPCId'
+
+  PublicSubnet1Id:
+    Description: Public Subnet 1
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub '${Environment}-PublicSubnet1'
+
+  PublicSubnet2Id:
+    Description: Public Subnet 2
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub '${Environment}-PublicSubnet2'
+
+  PrivateSubnet1Id:
+    Description: Private Subnet 1
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub '${Environment}-PrivateSubnet1'
+
+  PrivateSubnet2Id:
+    Description: Private Subnet 2
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub '${Environment}-PrivateSubnet2'
+
+  AppSecurityGroupId:
+    Description: App Security Group
+    Value: !Ref AppSecurityGroup
+    Export:
+      Name: !Sub '${Environment}-AppSG'
+
+  DBSecurityGroupId:
+    Description: DB Security Group
+    Value: !Ref DBSecurityGroup
+    Export:
+      Name: !Sub '${Environment}-DBSG'
+
+  RDSEndpoint:
+    Description: RDS Endpoint Address
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Export:
+      Name: !Sub '${Environment}-RDSEndpoint'
+
+  RDSPort:
+    Description: RDS Port
+    Value: !GetAtt RDSInstance.Endpoint.Port
+
+  DBName:
+    Description: Database name
+    Value: !Ref DBName
+
+  KMSKeyId:
+    Description: KMS Key ID for PII encryption
+    Value: !Ref PIIEncryptionKey
+    Export:
+      Name: !Sub '${Environment}-KMSKeyId'
+
+  KMSKeyArn:
+    Description: KMS Key ARN
+    Value: !GetAtt PIIEncryptionKey.Arn
+    Export:
+      Name: !Sub '${Environment}-KMSKeyArn'
+
+  DBCredentialsSecretArn:
+    Description: Secrets Manager ARN for DB credentials
+    Value: !Ref DBCredentialsSecret
+    Export:
+      Name: !Sub '${Environment}-DBCredentialsArn'
+
+  AppSecretsArn:
+    Description: Secrets Manager ARN for app secrets
+    Value: !Ref AppSecretsSecret
+    Export:
+      Name: !Sub '${Environment}-AppSecretsArn'
+
+  ECSClusterName:
+    Description: ECS Cluster Name
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub '${Environment}-ECSCluster'
+
+  ECSClusterArn:
+    Description: ECS Cluster ARN
+    Value: !GetAtt ECSCluster.Arn
+
+  ECSTaskExecutionRoleArn:
+    Description: ECS Task Execution Role ARN
+    Value: !GetAtt ECSTaskExecutionRole.Arn
+    Export:
+      Name: !Sub '${Environment}-ECSTaskExecRole'
+
+  ECSTaskRoleArn:
+    Description: ECS Task Role ARN
+    Value: !GetAtt ECSTaskRole.Arn
+    Export:
+      Name: !Sub '${Environment}-ECSTaskRole'
+
+  SitesBucketName:
+    Description: S3 Bucket for static sites
+    Value: !Ref SitesBucket
+    Export:
+      Name: !Sub '${Environment}-SitesBucket'
+
+  SitesBucketArn:
+    Description: S3 Bucket ARN
+    Value: !GetAtt SitesBucket.Arn
+
+  SitesOACId:
+    Description: CloudFront Origin Access Control ID
+    Value: !Ref SitesOAC
+    Export:
+      Name: !Sub '${Environment}-SitesOAC'

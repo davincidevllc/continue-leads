@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.turbo/
+*.log
+.env
+.env.local
+.env.staging
+.env.production
+.DS_Store
+coverage/
+.next/
+out/

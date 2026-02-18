@@ -1,0 +1,25 @@
+{
+  "name": "@continue-leads/db",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "tsc --noEmit",
+    "migrate": "node dist/migrate.js",
+    "seed": "node dist/seed.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.0",
+    "@continue-leads/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

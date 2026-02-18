@@ -1,0 +1,23 @@
+{
+  "name": "continue-leads",
+  "private": true,
+  "description": "Continue Leads - Programmatic lead generation platform",
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "db:migrate": "pnpm --filter @continue-leads/db migrate",
+    "db:migrate:staging": "NODE_ENV=staging pnpm --filter @continue-leads/db migrate",
+    "db:migrate:production": "NODE_ENV=production pnpm --filter @continue-leads/db migrate",
+    "clean": "turbo run clean"
+  },
+  "devDependencies": {
+    "turbo": "^2.4.0",
+    "typescript": "^5.7.0"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
