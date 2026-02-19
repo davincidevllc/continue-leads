@@ -33,7 +33,7 @@ COPY --from=deps /app/apps/admin/node_modules ./apps/admin/node_modules
 COPY --from=builder /app/apps/admin/.next ./apps/admin/.next
 COPY --from=builder /app/apps/admin/package.json ./apps/admin/package.json
 COPY --from=builder /app/apps/admin/next.config.js ./apps/admin/next.config.js
-COPY --from=builder /app/apps/admin/public ./apps/admin/public 2>/dev/null || true
+COPY --from=builder /app/apps/admin/public ./apps/admin/public
 COPY package.json pnpm-workspace.yaml ./
 WORKDIR /app/apps/admin
 EXPOSE 3000
