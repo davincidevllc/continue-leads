@@ -3,7 +3,7 @@ import { redirect } from 'next/navigation';
 import crypto from 'crypto';
 
 const AUTH_COOKIE = 'cl_admin_session';
-const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 
 function getSecret(): string {
   const secret = process.env.ADMIN_AUTH_SECRET;
@@ -36,7 +36,7 @@ export async function createSession(): Promise<void> {
   const cookieStore = await cookies();
   cookieStore.set(AUTH_COOKIE, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: false,
     sameSite: 'lax',
     maxAge: SESSION_DURATION_MS / 1000,
     path: '/',
