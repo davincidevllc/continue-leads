@@ -10,7 +10,6 @@ const pool = new Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
   ssl: { rejectUnauthorized: false },
-  ssl: { rejectUnauthorized: false },
 });
 
 async function query<T = Record<string, unknown>>(text: string, params?: unknown[]): Promise<T[]> {
