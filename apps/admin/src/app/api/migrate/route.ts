@@ -23,38 +23,41 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const results: string[] = [];
-    const homeImpId = '7cbbee1b-7078-49d9-b16c-1301053a3286';
-    const oldVerticalIds = [
-      '20bf7edf-2705-4561-a757-6e66ef082fa2',
-      'e3e6cc92-2bc5-43e1-add6-bff189367ca0',
-      '5773d904-99e5-4a8c-81bf-565b091ea1eb'
+    const results: Record<string, any> = {};
+
+    // Get columns for each lead-related table
+    const leadTables = [
+      'leads', 'lead_contacts', 'lead_consents', 'lead_attributions',
+      'lead_details', 'lead_dedupe_claims', 'lead_status_events'
     ];
 
-    // 1. Update any sites pointing to old verticals → Home Improvement
-    const siteUpdate = await directPool.query(
-      'UPDATE sites SET vertical_id = $1 WHERE vertical_id = ANY($2)',
-      [homeImpId, oldVerticalIds]
+    for (const table of leadTables) {
+      const cols = await directPool.query(
+        `SELECT column_name, data_type, column_default, is_nullable
+         FROM information_schema.columns 
+         WHERE table_name = $1 
+         ORDER BY ordinal_position`,
+        [table]
+      );
+      results[table] = cols.rows;
+    }
+
+    // Also get sites columns for reference
+    const sitesCols = await directPool.query(
+      `SELECT column_name, data_type FROM information_schema.columns 
+       WHERE table_name = 'sites' ORDER BY ordinal_position`
     );
-    results.push('Updated ' + siteUpdate.rowCount + ' sites to Home Improvement');
+    results['sites'] = sitesCols.rows;
 
-    // 2. Delete old verticals (Interior Painting, Residential Cleaning, Siding)
-    const delResult = await directPool.query(
-      'DELETE FROM verticals WHERE id = ANY($1)',
-      [oldVerticalIds]
+    // Check constraints on lead_dedupe_claims
+    const constraints = await directPool.query(
+      `SELECT conname, contype, pg_get_constraintdef(oid) as definition
+       FROM pg_constraint 
+       WHERE conrelid = 'lead_dedupe_claims'::regclass`
     );
-    results.push('Deleted ' + delResult.rowCount + ' old verticals');
+    results['dedupe_constraints'] = constraints.rows;
 
-    // Verification
-    const verts = await directPool.query('SELECT id, name, slug FROM verticals ORDER BY name');
-
-    return NextResponse.json({
-      success: true,
-      steps: results,
-      verification: {
-        verticals_remaining: verts.rows
-      }
-    });
+    return NextResponse.json({ success: true, schema: results });
 
   } catch (error: any) {
     return NextResponse.json({
