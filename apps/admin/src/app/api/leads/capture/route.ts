@@ -18,6 +18,7 @@ const pool: any = new Pool({
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
+const DEFAULT_DEDUPE_WINDOW_DAYS = 7;
 
 function getEncryptionKey(): Buffer {
   const hex = process.env.PII_ENCRYPTION_KEY;
@@ -91,7 +92,7 @@ export async function POST(request: Request) {
       );
       if (existing.rows.length > 0) {
         return NextResponse.json({
-          success: true, lead_id: existing.rows[0].id, dedupe: false, message: 'Duplicate submission (idempotency)'
+          success: true, lead_id: existing.rows[0].id, dedupe_hit: false, message: 'Duplicate submission (idempotency)'
         }, { status: 200, headers: corsHeaders() });
       }
     }
@@ -132,8 +133,8 @@ export async function POST(request: Request) {
 
     let dedupeHit = false;
     const now = new Date();
-    const dedupeWindow = 30;
-    const windowEnd = new Date(now.getTime() + dedupeWindow * 24 * 60 * 60 * 1000);
+    const dedupeWindowDays = DEFAULT_DEDUPE_WINDOW_DAYS;
+    const windowEnd = new Date(now.getTime() + dedupeWindowDays * 24 * 60 * 60 * 1000);
 
     const dedupeCheck = await client.query(
       `SELECT lead_id FROM lead_dedupe_claims 
@@ -153,15 +154,18 @@ export async function POST(request: Request) {
       if (emailDedupeCheck.rows.length > 0) dedupeHit = true;
     }
 
+    const leadStatus = dedupeHit ? 'REJECTED' : 'NEW';
+    const rejectionReason = dedupeHit ? 'dedupe_hit' : null;
+
     const leadResult = await client.query(
       `INSERT INTO leads (
-        site_id, idempotency_key, status, dedupe_hit,
+        site_id, idempotency_key, status, rejection_reason, dedupe_hit,
         category_id, service_id,
         urgency, property_type, project_size_bucket, budget_range, timeframe_days,
         targeting_mode, zip, metro_slug
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       RETURNING id`,
-      [siteId, body.idempotency_key || null, 'NEW', dedupeHit,
+      [siteId, body.idempotency_key || null, leadStatus, rejectionReason, dedupeHit,
        categoryId, serviceId, body.urgency || null, body.property_type || null,
        body.project_size_bucket || null, body.budget_range || null, body.timeframe_days || null,
        'METRO', body.zip, null]
@@ -216,16 +220,16 @@ export async function POST(request: Request) {
     await client.query(
       `INSERT INTO lead_status_events (lead_id, from_status, to_status, reason)
        VALUES ($1, NULL, $2, $3)`,
-      [leadId, 'NEW', dedupeHit ? 'Phone dedupe hit' : 'New lead captured']
+      [leadId, leadStatus, dedupeHit ? 'Dedupe hit — not eligible for distribution' : 'New lead captured']
     );
 
     await client.query('COMMIT');
 
     return NextResponse.json({
       success: true, lead_id: leadId,
-      status: 'NEW',
+      status: leadStatus,
       dedupe_hit: dedupeHit,
-    }, { status: 201, headers: corsHeaders() });
+    }, { status: dedupeHit ? 200 : 201, headers: corsHeaders() });
 
   } catch (error: any) {
     await client.query('ROLLBACK').catch(() => {});
@@ -239,9 +243,6 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       error: 'Internal server error',
-      message: error.message,
-      code: error.code || null,
-      detail: error.detail || null,
     }, { status: 500, headers: corsHeaders() });
   } finally {
     client.release();
