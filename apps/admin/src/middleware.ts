@@ -25,7 +25,12 @@ async function verifyToken(token: string, secret: string): Promise<boolean> {
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  if (pathname === '/login' || pathname.startsWith('/api/auth') || pathname.startsWith('/api/migrate')) {
+  if (
+    pathname === '/login' ||
+    pathname.startsWith('/api/auth') ||
+    pathname.startsWith('/api/migrate') ||
+    pathname.startsWith('/api/leads/capture')
+  ) {
     return NextResponse.next();
   }
   const token = request.cookies.get(AUTH_COOKIE)?.value;
