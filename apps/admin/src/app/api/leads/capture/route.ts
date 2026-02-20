@@ -16,6 +16,56 @@ const pool: any = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
+// ─── Rate Limiting (in-memory) ───
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
+const RATE_LIMIT_MAX = 10; // 10 requests per minute per IP
+const ipRequestLog = new Map<string, number[]>();
+
+// Clean up stale entries every 5 minutes
+setInterval(() => {
+  const cutoff = Date.now() - RATE_LIMIT_WINDOW_MS;
+  for (const [ip, timestamps] of ipRequestLog.entries()) {
+    const filtered = timestamps.filter(t => t > cutoff);
+    if (filtered.length === 0) ipRequestLog.delete(ip);
+    else ipRequestLog.set(ip, filtered);
+  }
+}, 5 * 60 * 1000);
+
+function isRateLimited(ip: string): boolean {
+  const now = Date.now();
+  const cutoff = now - RATE_LIMIT_WINDOW_MS;
+  const timestamps = (ipRequestLog.get(ip) || []).filter(t => t > cutoff);
+  timestamps.push(now);
+  ipRequestLog.set(ip, timestamps);
+  return timestamps.length > RATE_LIMIT_MAX;
+}
+
+// ─── CORS Allowlist ───
+function getAllowedOrigins(): string[] | null {
+  const raw = process.env.ALLOWED_ORIGINS;
+  if (!raw || raw.trim() === '' || raw.trim() === '*') return null; // null = allow all (staging fallback)
+  return raw.split(',').map(o => o.trim().toLowerCase()).filter(Boolean);
+}
+
+function isOriginAllowed(origin: string | null): boolean {
+  const allowed = getAllowedOrigins();
+  if (!allowed) return true; // no allowlist configured = allow all (staging)
+  if (!origin) return false; // no origin header + allowlist configured = reject
+  return allowed.some(a => origin.toLowerCase() === a || origin.toLowerCase().endsWith('.' + a.replace(/^https?:\/\//, '')));
+}
+
+function corsHeaders(origin?: string | null) {
+  const allowed = getAllowedOrigins();
+  const allowOrigin = allowed ? (origin && isOriginAllowed(origin) ? origin : 'null') : '*';
+  return {
+    'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Vary': 'Origin',
+  };
+}
+
+// ─── Encryption ───
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
 const DEFAULT_DEDUPE_WINDOW_DAYS = 7;
@@ -39,6 +89,7 @@ function hashValue(value: string): string {
   return crypto.createHash('sha256').update(value.trim().toLowerCase()).digest('hex');
 }
 
+// ─── Validation ───
 function validate(body: any): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
   if (!body.phone || typeof body.phone !== 'string') errors.push('phone is required');
@@ -60,29 +111,48 @@ function validate(body: any): { valid: boolean; errors: string[] } {
   return { valid: errors.length === 0, errors };
 }
 
-function corsHeaders() {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-  };
+// ─── OPTIONS (CORS preflight) ───
+export async function OPTIONS(request: Request) {
+  const origin = request.headers.get('origin');
+  return new NextResponse(null, { status: 204, headers: corsHeaders(origin) });
 }
 
-export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: corsHeaders() });
-}
-
+// ─── POST /api/leads/capture ───
 export async function POST(request: Request) {
+  const origin = request.headers.get('origin');
+  const headers = corsHeaders(origin);
+
+  // CORS check
+  if (!isOriginAllowed(origin) && getAllowedOrigins() !== null) {
+    return NextResponse.json({ error: 'Origin not allowed' }, { status: 403, headers });
+  }
+
+  // Rate limiting
+  const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+    || request.headers.get('x-real-ip') || 'unknown';
+  if (isRateLimited(ip)) {
+    return NextResponse.json({ error: 'Too many requests. Please try again later.' }, { status: 429, headers });
+  }
+
   const client = await pool.connect();
 
   try {
     const body = await request.json();
 
+    // Honeypot check — hidden field "website" should be empty
+    if (body.website && body.website.trim() !== '') {
+      // Bot detected — return fake success, store nothing
+      return NextResponse.json({
+        success: true,
+        lead_id: crypto.randomUUID(),
+        status: 'NEW',
+        dedupe_hit: false,
+      }, { status: 201, headers });
+    }
+
     const { valid, errors } = validate(body);
     if (!valid) {
-      return NextResponse.json({ error: 'Validation failed', details: errors }, {
-        status: 400, headers: corsHeaders()
-      });
+      return NextResponse.json({ error: 'Validation failed', details: errors }, { status: 400, headers });
     }
 
     if (body.idempotency_key) {
@@ -93,7 +163,7 @@ export async function POST(request: Request) {
       if (existing.rows.length > 0) {
         return NextResponse.json({
           success: true, lead_id: existing.rows[0].id, dedupe_hit: false, message: 'Duplicate submission (idempotency)'
-        }, { status: 200, headers: corsHeaders() });
+        }, { status: 200, headers });
       }
     }
 
@@ -101,7 +171,7 @@ export async function POST(request: Request) {
       'SELECT id FROM categories WHERE slug = $1', [body.category_slug]
     );
     if (categoryResult.rows.length === 0) {
-      return NextResponse.json({ error: 'Invalid category_slug' }, { status: 400, headers: corsHeaders() });
+      return NextResponse.json({ error: 'Invalid category_slug' }, { status: 400, headers });
     }
     const categoryId = categoryResult.rows[0].id;
 
@@ -110,15 +180,13 @@ export async function POST(request: Request) {
       [body.service_slug, categoryId]
     );
     if (serviceResult.rows.length === 0) {
-      return NextResponse.json({ error: 'Invalid service_slug for this category' }, { status: 400, headers: corsHeaders() });
+      return NextResponse.json({ error: 'Invalid service_slug for this category' }, { status: 400, headers });
     }
     const serviceId = serviceResult.rows[0].id;
 
     const siteResult = await client.query('SELECT id FROM sites WHERE domain = $1', [body.domain]);
     const siteId = siteResult.rows.length > 0 ? siteResult.rows[0].id : null;
 
-    const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
-      || request.headers.get('x-real-ip') || null;
     const userAgent = request.headers.get('user-agent') || null;
 
     const phoneDigits = body.phone.replace(/\D/g, '');
@@ -229,7 +297,7 @@ export async function POST(request: Request) {
       success: true, lead_id: leadId,
       status: leadStatus,
       dedupe_hit: dedupeHit,
-    }, { status: dedupeHit ? 200 : 201, headers: corsHeaders() });
+    }, { status: dedupeHit ? 200 : 201, headers });
 
   } catch (error: any) {
     await client.query('ROLLBACK').catch(() => {});
@@ -238,12 +306,12 @@ export async function POST(request: Request) {
     if (error.code === '23P01') {
       return NextResponse.json({
         error: 'Duplicate lead detected', dedupe_hit: true
-      }, { status: 409, headers: corsHeaders() });
+      }, { status: 409, headers });
     }
 
     return NextResponse.json({
       error: 'Internal server error',
-    }, { status: 500, headers: corsHeaders() });
+    }, { status: 500, headers });
   } finally {
     client.release();
   }
