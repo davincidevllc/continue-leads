@@ -17,14 +17,19 @@ export async function POST(request: Request) {
     max: 3, ssl: { rejectUnauthorized: false },
   });
   try {
-    const result = await directPool.query(
-      `SELECT s.slug as service_slug, s.name as service_name, 
-              c.slug as category_slug, c.name as category_name
-       FROM services s
-       JOIN categories c ON s.category_id = c.id
-       ORDER BY c.name, s.name`
+    const constraints = await directPool.query(
+      `SELECT conname, pg_get_constraintdef(oid) as definition
+       FROM pg_constraint 
+       WHERE conrelid = 'leads'::regclass AND contype = 'c'`
     );
-    return NextResponse.json({ services: result.rows });
+    const dedupeWindow = await directPool.query(
+      `SELECT column_name, data_type, column_default FROM information_schema.columns 
+       WHERE table_name = 'categories' AND column_name LIKE '%dedupe%'`
+    );
+    return NextResponse.json({ 
+      lead_constraints: constraints.rows,
+      category_dedupe_columns: dedupeWindow.rows
+    });
   } finally {
     await directPool.end();
   }
