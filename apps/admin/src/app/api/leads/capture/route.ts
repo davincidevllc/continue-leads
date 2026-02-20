@@ -161,7 +161,7 @@ export async function POST(request: Request) {
         targeting_mode, zip, metro_slug
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       RETURNING id`,
-      [siteId, body.idempotency_key || null, dedupeHit ? 'DUPLICATE' : 'NEW', dedupeHit,
+      [siteId, body.idempotency_key || null, 'NEW', dedupeHit,
        categoryId, serviceId, body.urgency || null, body.property_type || null,
        body.project_size_bucket || null, body.budget_range || null, body.timeframe_days || null,
        'METRO', body.zip, null]
@@ -216,14 +216,14 @@ export async function POST(request: Request) {
     await client.query(
       `INSERT INTO lead_status_events (lead_id, from_status, to_status, reason)
        VALUES ($1, NULL, $2, $3)`,
-      [leadId, dedupeHit ? 'DUPLICATE' : 'NEW', dedupeHit ? 'Phone dedupe hit' : 'New lead captured']
+      [leadId, 'NEW', dedupeHit ? 'Phone dedupe hit' : 'New lead captured']
     );
 
     await client.query('COMMIT');
 
     return NextResponse.json({
       success: true, lead_id: leadId,
-      status: dedupeHit ? 'DUPLICATE' : 'NEW',
+      status: 'NEW',
       dedupe_hit: dedupeHit,
     }, { status: 201, headers: corsHeaders() });
 
