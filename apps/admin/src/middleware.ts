@@ -29,7 +29,6 @@ export async function middleware(request: NextRequest) {
     pathname === '/login' ||
     pathname.startsWith('/api/auth') ||
     pathname.startsWith('/api/leads/capture') ||
-    pathname.startsWith('/api/migrate')       // TEMP: remove after migration
   ) {
     return NextResponse.next();
   }
