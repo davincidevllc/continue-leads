@@ -1,13 +1,4 @@
-```
-
-Go to line 31 and change:
-```
-    pathname.startsWith('/api/leads/capture')
-```
-
-to:
-```
-    pathname.startsWith('/api/leads/capture')import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
 const AUTH_COOKIE = 'cl_admin_session';
 const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -37,7 +28,7 @@ export async function middleware(request: NextRequest) {
   if (
     pathname === '/login' ||
     pathname.startsWith('/api/auth') ||
-    pathname.startsWith('/api/leads/capture') ||
+    pathname.startsWith('/api/leads/capture')
   ) {
     return NextResponse.next();
   }
