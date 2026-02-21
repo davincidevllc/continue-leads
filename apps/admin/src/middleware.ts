@@ -1,4 +1,13 @@
-import { NextRequest, NextResponse } from 'next/server';
+```
+
+Go to line 31 and change:
+```
+    pathname.startsWith('/api/leads/capture')
+```
+
+to:
+```
+    pathname.startsWith('/api/leads/capture')import { NextRequest, NextResponse } from 'next/server';
 
 const AUTH_COOKIE = 'cl_admin_session';
 const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
