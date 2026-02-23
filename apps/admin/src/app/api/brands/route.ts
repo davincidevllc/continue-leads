@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
     const offset = parseInt(searchParams.get('offset') || '0');
 
     const conditions: string[] = [];
-    const values: any[] = [];
+    const values: unknown[] = [];
     let paramIdx = 1;
 
     if (status) {
@@ -40,6 +40,7 @@ export async function GET(request: NextRequest) {
         s.category_id,
         c.name AS category_name,
         c.slug AS category_slug,
+        v.name AS vertical_name,
         t.name AS template_name,
         s.slug_strategy_config,
         s.blog_config,
@@ -53,6 +54,7 @@ export async function GET(request: NextRequest) {
         (SELECT COUNT(*)::int FROM generation_jobs gj WHERE gj.site_id = s.id) AS job_count
       FROM sites s
       LEFT JOIN categories c ON s.category_id = c.id
+      LEFT JOIN verticals v ON s.vertical_id = v.id
       LEFT JOIN templates t ON s.template_id = t.id
       ${where}
       ORDER BY s.created_at DESC
@@ -79,7 +81,7 @@ export async function GET(request: NextRequest) {
 // POST /api/brands
 // Create a new brand with targeting (wizard submit)
 export async function POST(request: NextRequest) {
-  const client = await pool.connect();
+  const client = await (pool as any).connect();
 
   try {
     const body = await request.json();
@@ -101,10 +103,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Domain already exists' }, { status: 409 });
     }
 
-    // Verify category exists
-    const catCheck = await client.query('SELECT id FROM categories WHERE id = $1', [body.category_id]);
+    // Verify category exists AND get its vertical_id
+    const catCheck = await client.query(
+      'SELECT id, vertical_id FROM categories WHERE id = $1',
+      [body.category_id]
+    );
     if (catCheck.rows.length === 0) {
       return NextResponse.json({ error: 'Invalid category_id' }, { status: 400 });
+    }
+    const verticalId = catCheck.rows[0].vertical_id;
+    if (!verticalId) {
+      return NextResponse.json({
+        error: 'Category has no vertical assigned. Seed verticals first.',
+      }, { status: 400 });
     }
 
     // Verify template exists
@@ -115,18 +126,19 @@ export async function POST(request: NextRequest) {
 
     await client.query('BEGIN');
 
-    // 1. Create site/brand record
+    // 1. Create site/brand record — includes vertical_id and uppercase DRAFT
     const siteResult = await client.query(`
       INSERT INTO sites (
-        domain, brand_name, category_id, template_id,
+        domain, brand_name, category_id, vertical_id, template_id,
         brand_seed, theme_config, target_geo_config,
         slug_strategy_config, blog_config, indexing_mode, status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING id
     `, [
       body.domain.toLowerCase(),
       body.brand_name || null,
       body.category_id,
+      verticalId,
       body.template_id,
       JSON.stringify(body.brand_seed || {}),
       JSON.stringify(body.theme_config || {}),
@@ -138,7 +150,7 @@ export async function POST(request: NextRequest) {
       }),
       JSON.stringify(body.blog_config || { enabled: false }),
       'noindex',
-      'draft',
+      'DRAFT',
     ]);
     const siteId = siteResult.rows[0].id;
 
@@ -221,8 +233,8 @@ export async function POST(request: NextRequest) {
     const derivedCities = cityCount.rows[0].count;
     const activeServices = serviceCount.rows[0].count;
 
-    // Page estimate: home(1) + services(N) + cities(C) + money(C*N) + legal(3)
-    const estimatedPages = 1 + activeServices + derivedCities + (derivedCities * activeServices) + 3;
+    // Page estimate: home(1) + services(N) + cities(C) + money(C*N) + legal(7) + blog(1)
+    const estimatedPages = 1 + activeServices + derivedCities + (derivedCities * activeServices) + 7 + 1;
 
     await client.query('COMMIT');
 
@@ -230,8 +242,9 @@ export async function POST(request: NextRequest) {
       success: true,
       brand_id: siteId,
       domain: body.domain.toLowerCase(),
-      status: 'draft',
+      status: 'DRAFT',
       indexing_mode: 'noindex',
+      vertical_id: verticalId,
       targeting_summary: {
         states: targetStates.length,
         counties: targetCountyIds.length,
@@ -255,4 +268,3 @@ export async function POST(request: NextRequest) {
     client.release();
   }
 }
-
