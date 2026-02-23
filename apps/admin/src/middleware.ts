@@ -32,7 +32,7 @@ export async function middleware(request: NextRequest) {
     pathname.startsWith('/api/taxonomy') ||
     pathname.startsWith('/api/geo') ||
     pathname.startsWith('/api/brands') ||
-    pathname.startsWith('/api/admin') ||
+    pathname.startsWith('/api/admin')
   ) {
     return NextResponse.next();
   }
