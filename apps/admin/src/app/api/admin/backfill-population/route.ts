@@ -304,7 +304,7 @@ export async function POST(request: NextRequest) {
 
         const result = await client.query(`
           UPDATE cities c
-          SET population = v.pop, updated_at = NOW()
+          SET population = v.pop
           FROM (VALUES ${valuesClauses.join(',')}) AS v(slug, state_code, pop)
           WHERE c.slug = v.slug AND c.state_code = v.state_code AND (c.population IS NULL OR c.population != v.pop)
         `, params);
