@@ -22,10 +22,9 @@ export async function POST(request: NextRequest) {
   });
   try {
     const start = Date.now();
-    await pool.query(sql);
+    const result = await pool.query(sql);
     const elapsed = Date.now() - start;
-    const r = await pool.query('SELECT id, name, category FROM templates');
-    return NextResponse.json({ success: true, elapsed_ms: elapsed, templates: r.rows });
+    return NextResponse.json({ success: true, elapsed_ms: elapsed, rows: result.rows || [] });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     return NextResponse.json({ success: false, error: msg }, { status: 500 });
