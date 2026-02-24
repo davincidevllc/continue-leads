@@ -9,6 +9,7 @@ export function Nav() {
     { href: '/', label: 'Dashboard', icon: '📊' },
     { href: '/metros', label: 'Metros', icon: '🏙️' },
     { href: '/verticals', label: 'Verticals', icon: '🔧' },
+    { href: '/brands/new', label: 'New Brand', icon: '🚀' },
     { href: '/sites', label: 'Sites', icon: '🌐' },
     { href: '/leads', label: 'Leads', icon: '📋' },
   ];
