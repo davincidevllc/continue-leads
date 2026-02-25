@@ -124,6 +124,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid template_id' }, { status: 400 });
     }
 
+    // V2 targeting params
+    const cityCapValue = Math.min(Math.max(body.city_cap || 25, 1), 100);
+    const pinnedCityIds: number[] = body.pinned_city_ids || [];
+    const excludedCityIds: number[] = body.excluded_city_ids || [];
+
     await client.query('BEGIN');
 
     // 1. Create site/brand record — includes vertical_id and uppercase DRAFT
@@ -142,7 +147,12 @@ export async function POST(request: NextRequest) {
       body.template_id,
       JSON.stringify(body.brand_seed || {}),
       JSON.stringify(body.theme_config || {}),
-      JSON.stringify(body.target_geo_config || {}),
+      JSON.stringify({
+        ...(body.target_geo_config || {}),
+        city_cap: cityCapValue,
+        pinned_city_ids: pinnedCityIds,
+        excluded_city_ids: excludedCityIds,
+      }),
       JSON.stringify(body.slug_strategy_config || {
         money: '/{city-slug}-{state}/{service-slug}',
         service: '/services/{service-slug}',
@@ -158,9 +168,7 @@ export async function POST(request: NextRequest) {
     const serviceIds: string[] = body.service_ids || [];
     if (serviceIds.length === 0) {
       // Default: select all services in the category
-      // No separate table needed — query services by category_id at generation time
     }
-    // Future: site_services junction table if needed
 
     // 3. Insert geo targeting
     const targetStates: string[] = body.target_states || [];
@@ -181,7 +189,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Dedupe zips within this brand
     const uniqueZips = [...new Set(targetZips)];
     for (const zip of uniqueZips) {
       await client.query(
@@ -191,7 +198,6 @@ export async function POST(request: NextRequest) {
     }
 
     // 4. Derive target cities from targeting selections
-    // Union of: cities in selected states + cities in selected counties + primary city of selected zips
     await client.query(`
       INSERT INTO site_target_cities (site_id, city_id, source)
       SELECT DISTINCT $1, c.id, 'state'
@@ -220,7 +226,25 @@ export async function POST(request: NextRequest) {
       ON CONFLICT (site_id, city_id) DO NOTHING
     `, [siteId]);
 
-    // 5. Count derived cities and get service count for estimates
+    // 5. V2: Apply pin/exclude to site_target_cities
+    // Delete excluded cities
+    if (excludedCityIds.length > 0) {
+      await client.query(
+        'DELETE FROM site_target_cities WHERE site_id = $1 AND city_id = ANY($2::int[])',
+        [siteId, excludedCityIds]
+      );
+    }
+
+    // Insert pinned cities (mark as 'pinned' source)
+    for (const cityId of pinnedCityIds) {
+      await client.query(`
+        INSERT INTO site_target_cities (site_id, city_id, source)
+        VALUES ($1, $2, 'pinned')
+        ON CONFLICT (site_id, city_id) DO UPDATE SET source = 'pinned'
+      `, [siteId, cityId]);
+    }
+
+    // 6. Count derived cities and get service count for estimates
     const cityCount = await client.query(
       'SELECT COUNT(*)::int AS count FROM site_target_cities WHERE site_id = $1',
       [siteId]
@@ -233,8 +257,9 @@ export async function POST(request: NextRequest) {
     const derivedCities = cityCount.rows[0].count;
     const activeServices = serviceCount.rows[0].count;
 
-    // Page estimate: home(1) + services(N) + cities(C) + money(C*N) + legal(7) + blog(1)
-    const estimatedPages = 1 + activeServices + derivedCities + (derivedCities * activeServices) + 7 + 1;
+    // Estimate uses the cap (not total derived)
+    const cappedCities = Math.min(derivedCities, cityCapValue * targetStates.length);
+    const estimatedPages = 1 + activeServices + cappedCities + Math.min(cappedCities * activeServices, 250) + 7 + 1;
 
     await client.query('COMMIT');
 
@@ -250,11 +275,14 @@ export async function POST(request: NextRequest) {
         counties: targetCountyIds.length,
         zips: uniqueZips.length,
         derived_cities: derivedCities,
+        city_cap: cityCapValue,
+        pinned: pinnedCityIds.length,
+        excluded: excludedCityIds.length,
       },
       page_estimate: {
         services: activeServices,
-        cities: derivedCities,
-        money_pages: derivedCities * activeServices,
+        cities: cappedCities,
+        money_pages: Math.min(cappedCities * activeServices, 250),
         total: estimatedPages,
       },
     }, { status: 201 });

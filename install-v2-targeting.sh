@@ -1,3 +1,28 @@
+#!/bin/bash
+# Install V2 Targeting: Step 3 redesign (city cap, pin, exclude)
+# Run from repo root: ~/Downloads/continue-leads
+#
+# Changes:
+#   apps/admin/src/app/brands/new/page.tsx           (Wizard V2 - redesigned Step 3)
+#   apps/admin/src/app/api/brands/route.ts           (Accept city_cap, pinned, excluded)
+#   apps/admin/src/app/api/brands/[id]/generate-pages/route.ts (Pinned-first ranking, read cap from config)
+
+set -e
+
+echo "=== Installing V2 Targeting ==="
+echo ""
+
+# ──────────────────────────────────────────────────────────────
+# 1. Verify we're in the right directory
+# ──────────────────────────────────────────────────────────────
+if [ ! -f "apps/admin/src/app/brands/new/page.tsx" ]; then
+  echo "❌ Error: apps/admin/src/app/brands/new/page.tsx not found."
+  echo "   Run this script from the repo root (e.g., ~/Downloads/continue-leads)"
+  exit 1
+fi
+
+echo "1/3  Updating Brand Launch Wizard (page.tsx)..."
+cat > apps/admin/src/app/brands/new/page.tsx << 'ENDOFFILE_PAGE'
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
@@ -1274,3 +1299,649 @@ export default function BrandWizardPage() {
     </AuthLayout>
   );
 }
+ENDOFFILE_PAGE
+
+echo "   ✅ Wizard V2 installed"
+
+# ──────────────────────────────────────────────────────────────
+# 2. Update brands POST route
+# ──────────────────────────────────────────────────────────────
+echo "2/3  Updating brands API route..."
+
+cat > apps/admin/src/app/api/brands/route.ts << 'ENDOFFILE_BRANDS'
+import { NextRequest, NextResponse } from 'next/server';
+import pool from '@/lib/pool';
+
+export const dynamic = 'force-dynamic';
+
+// GET /api/brands
+// List all brands/sites with category, template, targeting summary
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const status = searchParams.get('status');
+    const categoryId = searchParams.get('category_id');
+    const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 200);
+    const offset = parseInt(searchParams.get('offset') || '0');
+
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+    let paramIdx = 1;
+
+    if (status) {
+      conditions.push(`s.status = $${paramIdx++}`);
+      values.push(status);
+    }
+    if (categoryId) {
+      conditions.push(`s.category_id = $${paramIdx++}`);
+      values.push(categoryId);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    values.push(limit, offset);
+
+    const result = await pool.query(`
+      SELECT 
+        s.id,
+        s.domain,
+        s.brand_name,
+        s.status,
+        s.indexing_mode,
+        s.category_id,
+        c.name AS category_name,
+        c.slug AS category_slug,
+        v.name AS vertical_name,
+        t.name AS template_name,
+        s.slug_strategy_config,
+        s.blog_config,
+        s.created_at,
+        s.updated_at,
+        (SELECT COUNT(*)::int FROM site_target_states ts WHERE ts.site_id = s.id) AS target_states,
+        (SELECT COUNT(*)::int FROM site_target_counties tc WHERE tc.site_id = s.id) AS target_counties,
+        (SELECT COUNT(*)::int FROM site_target_zips tz WHERE tz.site_id = s.id) AS target_zips,
+        (SELECT COUNT(*)::int FROM site_target_cities tci WHERE tci.site_id = s.id) AS target_cities,
+        (SELECT COUNT(*)::int FROM site_pages sp WHERE sp.site_id = s.id) AS page_count,
+        (SELECT COUNT(*)::int FROM generation_jobs gj WHERE gj.site_id = s.id) AS job_count
+      FROM sites s
+      LEFT JOIN categories c ON s.category_id = c.id
+      LEFT JOIN verticals v ON s.vertical_id = v.id
+      LEFT JOIN templates t ON s.template_id = t.id
+      ${where}
+      ORDER BY s.created_at DESC
+      LIMIT $${paramIdx++} OFFSET $${paramIdx}
+    `, values);
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM sites s ${where}`,
+      values.slice(0, conditions.length)
+    );
+
+    return NextResponse.json({
+      brands: result.rows,
+      total: countResult.rows[0].total,
+      limit,
+      offset,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
+}
+
+// POST /api/brands
+// Create a new brand with targeting (wizard submit)
+export async function POST(request: NextRequest) {
+  const client = await (pool as any).connect();
+
+  try {
+    const body = await request.json();
+
+    // --- Validate required fields ---
+    const errors: string[] = [];
+    if (!body.domain || typeof body.domain !== 'string') errors.push('domain is required');
+    if (!body.category_id) errors.push('category_id is required');
+    if (!body.template_id) errors.push('template_id is required');
+    if (errors.length > 0) {
+      return NextResponse.json({ error: 'Validation failed', details: errors }, { status: 400 });
+    }
+
+    // Check domain uniqueness
+    const domainCheck = await client.query(
+      'SELECT id FROM sites WHERE domain = $1', [body.domain.toLowerCase()]
+    );
+    if (domainCheck.rows.length > 0) {
+      return NextResponse.json({ error: 'Domain already exists' }, { status: 409 });
+    }
+
+    // Verify category exists AND get its vertical_id
+    const catCheck = await client.query(
+      'SELECT id, vertical_id FROM categories WHERE id = $1',
+      [body.category_id]
+    );
+    if (catCheck.rows.length === 0) {
+      return NextResponse.json({ error: 'Invalid category_id' }, { status: 400 });
+    }
+    const verticalId = catCheck.rows[0].vertical_id;
+    if (!verticalId) {
+      return NextResponse.json({
+        error: 'Category has no vertical assigned. Seed verticals first.',
+      }, { status: 400 });
+    }
+
+    // Verify template exists
+    const tplCheck = await client.query('SELECT id FROM templates WHERE id = $1', [body.template_id]);
+    if (tplCheck.rows.length === 0) {
+      return NextResponse.json({ error: 'Invalid template_id' }, { status: 400 });
+    }
+
+    // V2 targeting params
+    const cityCapValue = Math.min(Math.max(body.city_cap || 25, 1), 100);
+    const pinnedCityIds: number[] = body.pinned_city_ids || [];
+    const excludedCityIds: number[] = body.excluded_city_ids || [];
+
+    await client.query('BEGIN');
+
+    // 1. Create site/brand record — includes vertical_id and uppercase DRAFT
+    const siteResult = await client.query(`
+      INSERT INTO sites (
+        domain, brand_name, category_id, vertical_id, template_id,
+        brand_seed, theme_config, target_geo_config,
+        slug_strategy_config, blog_config, indexing_mode, status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      RETURNING id
+    `, [
+      body.domain.toLowerCase(),
+      body.brand_name || null,
+      body.category_id,
+      verticalId,
+      body.template_id,
+      JSON.stringify(body.brand_seed || {}),
+      JSON.stringify(body.theme_config || {}),
+      JSON.stringify({
+        ...(body.target_geo_config || {}),
+        city_cap: cityCapValue,
+        pinned_city_ids: pinnedCityIds,
+        excluded_city_ids: excludedCityIds,
+      }),
+      JSON.stringify(body.slug_strategy_config || {
+        money: '/{city-slug}-{state}/{service-slug}',
+        service: '/services/{service-slug}',
+        city: '/areas/{city-slug}-{state}',
+      }),
+      JSON.stringify(body.blog_config || { enabled: false }),
+      'noindex',
+      'DRAFT',
+    ]);
+    const siteId = siteResult.rows[0].id;
+
+    // 2. Insert service selections (default: all in category)
+    const serviceIds: string[] = body.service_ids || [];
+    if (serviceIds.length === 0) {
+      // Default: select all services in the category
+    }
+
+    // 3. Insert geo targeting
+    const targetStates: string[] = body.target_states || [];
+    const targetCountyIds: number[] = body.target_county_ids || [];
+    const targetZips: string[] = body.target_zips || [];
+
+    for (const stateCode of targetStates) {
+      await client.query(
+        'INSERT INTO site_target_states (site_id, state_code) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [siteId, stateCode.toUpperCase()]
+      );
+    }
+
+    for (const countyId of targetCountyIds) {
+      await client.query(
+        'INSERT INTO site_target_counties (site_id, county_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [siteId, countyId]
+      );
+    }
+
+    const uniqueZips = [...new Set(targetZips)];
+    for (const zip of uniqueZips) {
+      await client.query(
+        'INSERT INTO site_target_zips (site_id, zip) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [siteId, zip]
+      );
+    }
+
+    // 4. Derive target cities from targeting selections
+    await client.query(`
+      INSERT INTO site_target_cities (site_id, city_id, source)
+      SELECT DISTINCT $1, c.id, 'state'
+      FROM cities c
+      INNER JOIN site_target_states ts ON ts.site_id = $1 AND ts.state_code = c.state_code
+      WHERE c.is_active = true
+      ON CONFLICT (site_id, city_id) DO NOTHING
+    `, [siteId]);
+
+    await client.query(`
+      INSERT INTO site_target_cities (site_id, city_id, source)
+      SELECT DISTINCT $1, c.id, 'county'
+      FROM cities c
+      INNER JOIN counties co ON co.state_code = c.state_code AND co.name = c.county_name
+      INNER JOIN site_target_counties tc ON tc.site_id = $1 AND tc.county_id = co.id
+      WHERE c.is_active = true
+      ON CONFLICT (site_id, city_id) DO NOTHING
+    `, [siteId]);
+
+    await client.query(`
+      INSERT INTO site_target_cities (site_id, city_id, source)
+      SELECT DISTINCT $1, z.city_id, 'zip'
+      FROM zip_codes z
+      INNER JOIN site_target_zips tz ON tz.site_id = $1 AND tz.zip = z.zip
+      WHERE z.city_id IS NOT NULL
+      ON CONFLICT (site_id, city_id) DO NOTHING
+    `, [siteId]);
+
+    // 5. V2: Apply pin/exclude to site_target_cities
+    // Delete excluded cities
+    if (excludedCityIds.length > 0) {
+      await client.query(
+        'DELETE FROM site_target_cities WHERE site_id = $1 AND city_id = ANY($2::int[])',
+        [siteId, excludedCityIds]
+      );
+    }
+
+    // Insert pinned cities (mark as 'pinned' source)
+    for (const cityId of pinnedCityIds) {
+      await client.query(`
+        INSERT INTO site_target_cities (site_id, city_id, source)
+        VALUES ($1, $2, 'pinned')
+        ON CONFLICT (site_id, city_id) DO UPDATE SET source = 'pinned'
+      `, [siteId, cityId]);
+    }
+
+    // 6. Count derived cities and get service count for estimates
+    const cityCount = await client.query(
+      'SELECT COUNT(*)::int AS count FROM site_target_cities WHERE site_id = $1',
+      [siteId]
+    );
+    const serviceCount = await client.query(
+      'SELECT COUNT(*)::int AS count FROM services WHERE category_id = $1 AND is_active = true',
+      [body.category_id]
+    );
+
+    const derivedCities = cityCount.rows[0].count;
+    const activeServices = serviceCount.rows[0].count;
+
+    // Estimate uses the cap (not total derived)
+    const cappedCities = Math.min(derivedCities, cityCapValue * targetStates.length);
+    const estimatedPages = 1 + activeServices + cappedCities + Math.min(cappedCities * activeServices, 250) + 7 + 1;
+
+    await client.query('COMMIT');
+
+    return NextResponse.json({
+      success: true,
+      brand_id: siteId,
+      domain: body.domain.toLowerCase(),
+      status: 'DRAFT',
+      indexing_mode: 'noindex',
+      vertical_id: verticalId,
+      targeting_summary: {
+        states: targetStates.length,
+        counties: targetCountyIds.length,
+        zips: uniqueZips.length,
+        derived_cities: derivedCities,
+        city_cap: cityCapValue,
+        pinned: pinnedCityIds.length,
+        excluded: excludedCityIds.length,
+      },
+      page_estimate: {
+        services: activeServices,
+        cities: cappedCities,
+        money_pages: Math.min(cappedCities * activeServices, 250),
+        total: estimatedPages,
+      },
+    }, { status: 201 });
+
+  } catch (err: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    const detail = (err as { detail?: string }).detail || null;
+    return NextResponse.json({ error: msg, detail }, { status: 500 });
+  } finally {
+    client.release();
+  }
+}
+ENDOFFILE_BRANDS
+
+echo "   ✅ Brands route updated"
+
+# ──────────────────────────────────────────────────────────────
+# 3. Update generate-pages route
+# ──────────────────────────────────────────────────────────────
+echo "3/3  Updating generate-pages route..."
+
+cat > apps/admin/src/app/api/brands/\[id\]/generate-pages/route.ts << 'ENDOFFILE_GENPAGES'
+import { NextRequest, NextResponse } from 'next/server';
+import pool from '@/lib/pool';
+
+export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
+
+const DEFAULT_MAX_CITIES_PER_STATE = 25;
+const DEFAULT_MAX_MONEY_PAGES = 250;
+
+const LEGAL_PAGES = [
+  { path: '/about', title: 'About Us', slug: 'about' },
+  { path: '/contact', title: 'Contact Us', slug: 'contact' },
+  { path: '/faq', title: 'Frequently Asked Questions', slug: 'faq' },
+  { path: '/privacy-policy', title: 'Privacy Policy', slug: 'privacy-policy' },
+  { path: '/terms-of-service', title: 'Terms of Service', slug: 'terms-of-service' },
+  { path: '/thank-you', title: 'Thank You', slug: 'thank-you' },
+  { path: '/404', title: 'Page Not Found', slug: '404' },
+];
+
+interface SlugStrategy {
+  money?: string;
+  service?: string;
+  city?: string;
+}
+
+function buildPath(
+  template: string,
+  vars: { citySlug?: string; stateCode?: string; serviceSlug?: string }
+): string {
+  let path = template;
+  if (vars.citySlug) path = path.replace('{city-slug}', vars.citySlug);
+  if (vars.stateCode) path = path.replace('{state}', vars.stateCode.toLowerCase());
+  if (vars.serviceSlug) path = path.replace('{service-slug}', vars.serviceSlug);
+  return path;
+}
+
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const client = await pool.connect();
+
+  try {
+    const { id: siteId } = await params;
+
+    let maxCitiesPerState = DEFAULT_MAX_CITIES_PER_STATE;
+    let maxMoneyPages = DEFAULT_MAX_MONEY_PAGES;
+    try {
+      const body = await request.json();
+      if (body.max_cities_per_state) maxCitiesPerState = Math.min(body.max_cities_per_state, 100);
+      if (body.max_money_pages) maxMoneyPages = Math.min(body.max_money_pages, 1000);
+    } catch {
+      // No body — use defaults
+    }
+
+    const siteResult = await client.query(`
+      SELECT s.id, s.domain, s.category_id, s.slug_strategy_config, s.blog_config, s.brand_name,
+             s.target_geo_config,
+             c.name AS category_name, c.slug AS category_slug
+      FROM sites s
+      LEFT JOIN categories c ON s.category_id = c.id
+      WHERE s.id = $1
+    `, [siteId]);
+
+    if (siteResult.rows.length === 0) {
+      return NextResponse.json({ error: 'Brand not found' }, { status: 404 });
+    }
+
+    const brand = siteResult.rows[0];
+
+    // V2: Read city_cap from target_geo_config as fallback
+    const geoConfig = typeof brand.target_geo_config === 'string'
+      ? JSON.parse(brand.target_geo_config)
+      : (brand.target_geo_config || {});
+    if (maxCitiesPerState === DEFAULT_MAX_CITIES_PER_STATE && geoConfig.city_cap) {
+      maxCitiesPerState = Math.min(geoConfig.city_cap, 100);
+    }
+
+    if (!brand.category_id) {
+      return NextResponse.json({ error: 'Brand has no category assigned' }, { status: 400 });
+    }
+
+    const existingPages = await client.query(
+      'SELECT COUNT(*)::int AS count FROM site_pages WHERE site_id = $1',
+      [siteId]
+    );
+    if (existingPages.rows[0].count > 0) {
+      return NextResponse.json({
+        error: 'Pages already exist for this brand',
+        existing_count: existingPages.rows[0].count,
+        hint: 'DELETE existing pages first if you want to regenerate',
+      }, { status: 409 });
+    }
+
+    const servicesResult = await client.query(`
+      SELECT id, name, slug, service_code
+      FROM services
+      WHERE category_id = $1 AND is_active = true
+      ORDER BY sort_order NULLS LAST, name
+    `, [brand.category_id]);
+    const services = servicesResult.rows;
+
+    if (services.length === 0) {
+      return NextResponse.json({ error: 'No active services for this category' }, { status: 400 });
+    }
+
+    const citiesResult = await client.query(`
+      WITH ranked AS (
+        SELECT 
+          c.id AS city_id,
+          c.name AS city_name,
+          c.slug AS city_slug,
+          c.state_code,
+          c.population,
+          tc.source,
+          ROW_NUMBER() OVER (
+            PARTITION BY c.state_code 
+            ORDER BY 
+              CASE WHEN tc.source = 'pinned' THEN 0 ELSE 1 END,
+              c.population DESC NULLS LAST, c.name ASC
+          ) AS rn
+        FROM site_target_cities tc
+        JOIN cities c ON tc.city_id = c.id
+        WHERE tc.site_id = $1
+      )
+      SELECT city_id, city_name, city_slug, state_code, population, source, rn
+      FROM ranked
+      WHERE rn <= $2
+      ORDER BY state_code, rn
+    `, [siteId, maxCitiesPerState]);
+    const cities = citiesResult.rows;
+
+    const totalCitiesResult = await client.query(
+      'SELECT COUNT(*)::int AS count FROM site_target_cities WHERE site_id = $1',
+      [siteId]
+    );
+    const totalDerivedCities = totalCitiesResult.rows[0].count;
+
+    if (cities.length === 0) {
+      return NextResponse.json({ error: 'No target cities found. Create brand with geo targeting first.' }, { status: 400 });
+    }
+
+    const slugConfig: SlugStrategy = typeof brand.slug_strategy_config === 'string'
+      ? JSON.parse(brand.slug_strategy_config)
+      : (brand.slug_strategy_config || {});
+
+    const moneyTemplate = slugConfig.money || '/{city-slug}-{state}/{service-slug}';
+    const serviceTemplate = slugConfig.service || '/services/{service-slug}';
+    const cityTemplate = slugConfig.city || '/areas/{city-slug}-{state}';
+
+    await client.query('BEGIN');
+
+    const counts: Record<string, number> = {
+      HOME: 0, SERVICE: 0, CITY: 0, MONEY: 0, LEGAL: 0, BLOG_INDEX: 0,
+    };
+    let moneyTrimmed = false;
+    const citiesTrimmed = cities.length < totalDerivedCities;
+    const populationMissing = cities.some((c: { population: number | null }) => c.population === null);
+
+    await client.query(`
+      INSERT INTO site_pages (site_id, page_type, path, title, meta_description, status)
+      VALUES ($1, 'HOME', '/', $2, $3, 'draft')
+      ON CONFLICT (site_id, path) DO NOTHING
+    `, [
+      siteId,
+      `${brand.brand_name || brand.category_name} - Home`,
+      `Professional ${brand.category_name} services. Get a free quote today.`,
+    ]);
+    counts.HOME = 1;
+
+    for (const svc of services) {
+      const path = buildPath(serviceTemplate, { serviceSlug: svc.slug });
+      await client.query(`
+        INSERT INTO site_pages (site_id, page_type, service_id, path, title, meta_description, status)
+        VALUES ($1, 'SERVICE', $2, $3, $4, $5, 'draft')
+        ON CONFLICT (site_id, path) DO NOTHING
+      `, [
+        siteId,
+        svc.id,
+        path,
+        `${svc.name} Services`,
+        `Professional ${svc.name.toLowerCase()} services. Licensed, insured, and trusted.`,
+      ]);
+      counts.SERVICE++;
+    }
+
+    for (const city of cities) {
+      const path = buildPath(cityTemplate, {
+        citySlug: city.city_slug,
+        stateCode: city.state_code,
+      });
+      await client.query(`
+        INSERT INTO site_pages (site_id, page_type, city_id, path, title, meta_description, status)
+        VALUES ($1, 'CITY', $2, $3, $4, $5, 'draft')
+        ON CONFLICT (site_id, path) DO NOTHING
+      `, [
+        siteId,
+        city.city_id,
+        path,
+        `${brand.category_name} in ${city.city_name}, ${city.state_code}`,
+        `Top-rated ${brand.category_name.toLowerCase()} services in ${city.city_name}, ${city.state_code}. Free estimates.`,
+      ]);
+      counts.CITY++;
+    }
+
+    let moneyCount = 0;
+    moneyLoop:
+    for (const city of cities) {
+      for (const svc of services) {
+        if (moneyCount >= maxMoneyPages) {
+          moneyTrimmed = true;
+          break moneyLoop;
+        }
+        const path = buildPath(moneyTemplate, {
+          citySlug: city.city_slug,
+          stateCode: city.state_code,
+          serviceSlug: svc.slug,
+        });
+        await client.query(`
+          INSERT INTO site_pages (site_id, page_type, service_id, city_id, path, title, meta_description, status)
+          VALUES ($1, 'MONEY', $2, $3, $4, $5, $6, 'draft')
+          ON CONFLICT (site_id, path) DO NOTHING
+        `, [
+          siteId,
+          svc.id,
+          city.city_id,
+          path,
+          `${svc.name} in ${city.city_name}, ${city.state_code}`,
+          `Professional ${svc.name.toLowerCase()} in ${city.city_name}, ${city.state_code}. Licensed & insured. Free quotes.`,
+        ]);
+        moneyCount++;
+      }
+    }
+    counts.MONEY = moneyCount;
+
+    for (const lp of LEGAL_PAGES) {
+      await client.query(`
+        INSERT INTO site_pages (site_id, page_type, path, title, status)
+        VALUES ($1, 'LEGAL', $2, $3, 'draft')
+        ON CONFLICT (site_id, path) DO NOTHING
+      `, [siteId, lp.path, lp.title]);
+      counts.LEGAL++;
+    }
+
+    const blogConfig = typeof brand.blog_config === 'string'
+      ? JSON.parse(brand.blog_config)
+      : (brand.blog_config || {});
+
+    if (blogConfig.enabled) {
+      await client.query(`
+        INSERT INTO site_pages (site_id, page_type, path, title, status)
+        VALUES ($1, 'BLOG_INDEX', '/blog', 'Blog', 'draft')
+        ON CONFLICT (site_id, path) DO NOTHING
+      `, [siteId]);
+      counts.BLOG_INDEX = 1;
+    }
+
+    await client.query('COMMIT');
+
+    const verifyResult = await client.query(`
+      SELECT page_type, COUNT(*)::int AS count
+      FROM site_pages
+      WHERE site_id = $1
+      GROUP BY page_type
+      ORDER BY page_type
+    `, [siteId]);
+
+    const verifiedCounts: Record<string, number> = {};
+    let totalCreated = 0;
+    for (const row of verifyResult.rows) {
+      verifiedCounts[row.page_type] = row.count;
+      totalCreated += row.count;
+    }
+
+    return NextResponse.json({
+      success: true,
+      site_id: siteId,
+      pages_created: verifiedCounts,
+      total: totalCreated,
+      caps_applied: {
+        max_cities_per_state: maxCitiesPerState,
+        max_money_pages: maxMoneyPages,
+        cities_before_cap: totalDerivedCities,
+        cities_after_cap: cities.length,
+        cities_trimmed: citiesTrimmed,
+        money_trimmed: moneyTrimmed,
+      },
+      warnings: [
+        ...(populationMissing ? ['Some cities have no population data — ordering fell back to alphabetical. Run population backfill for accurate city ranking.'] : []),
+        ...(citiesTrimmed ? [`${totalDerivedCities - cities.length} cities excluded by per-state cap (${maxCitiesPerState}/state)`] : []),
+        ...(moneyTrimmed ? [`Money pages capped at ${maxMoneyPages}. ${cities.length * services.length - moneyCount} combinations skipped.`] : []),
+      ],
+    }, { status: 201 });
+
+  } catch (err: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    const detail = (err as { detail?: string }).detail || null;
+    return NextResponse.json({ error: msg, detail }, { status: 500 });
+  } finally {
+    client.release();
+  }
+}
+ENDOFFILE_GENPAGES
+
+echo "   ✅ Generate-pages route updated"
+
+echo ""
+echo "=== V2 Targeting Installation Complete ==="
+echo ""
+echo "Files updated:"
+echo "  ✅ apps/admin/src/app/brands/new/page.tsx           (Wizard V2)"
+echo "  ✅ apps/admin/src/app/api/brands/route.ts           (city_cap, pin, exclude)"
+echo "  ✅ apps/admin/src/app/api/brands/[id]/generate-pages/route.ts (pinned-first)"
+echo ""
+echo "Changes:"
+echo "  • Step 3 redesigned: removed counties & ZIPs, added city cap dropdown"
+echo "  • Pin cities: search & force-include specific cities"
+echo "  • Exclude cities: remove cities from the list"
+echo "  • City cap: 25/50/100 cities per state (default 25)"
+echo "  • Generate-pages: pinned cities rank first, reads cap from brand config"
+echo ""
+echo "Next steps:"
+echo "  git add -A"
+echo "  git commit -m 'feat: v2 targeting - city cap, pin/exclude cities, simplified Step 3'"
+echo "  git push origin main"
+echo ""
+echo "CI/CD will deploy to staging automatically."

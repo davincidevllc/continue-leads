@@ -55,6 +55,7 @@ export async function POST(
 
     const siteResult = await client.query(`
       SELECT s.id, s.domain, s.category_id, s.slug_strategy_config, s.blog_config, s.brand_name,
+             s.target_geo_config,
              c.name AS category_name, c.slug AS category_slug
       FROM sites s
       LEFT JOIN categories c ON s.category_id = c.id
@@ -66,6 +67,14 @@ export async function POST(
     }
 
     const brand = siteResult.rows[0];
+
+    // V2: Read city_cap from target_geo_config as fallback
+    const geoConfig = typeof brand.target_geo_config === 'string'
+      ? JSON.parse(brand.target_geo_config)
+      : (brand.target_geo_config || {});
+    if (maxCitiesPerState === DEFAULT_MAX_CITIES_PER_STATE && geoConfig.city_cap) {
+      maxCitiesPerState = Math.min(geoConfig.city_cap, 100);
+    }
 
     if (!brand.category_id) {
       return NextResponse.json({ error: 'Brand has no category assigned' }, { status: 400 });
@@ -103,15 +112,18 @@ export async function POST(
           c.slug AS city_slug,
           c.state_code,
           c.population,
+          tc.source,
           ROW_NUMBER() OVER (
             PARTITION BY c.state_code 
-            ORDER BY c.population DESC NULLS LAST, c.name ASC
+            ORDER BY 
+              CASE WHEN tc.source = 'pinned' THEN 0 ELSE 1 END,
+              c.population DESC NULLS LAST, c.name ASC
           ) AS rn
         FROM site_target_cities tc
         JOIN cities c ON tc.city_id = c.id
         WHERE tc.site_id = $1
       )
-      SELECT city_id, city_name, city_slug, state_code, population, rn
+      SELECT city_id, city_name, city_slug, state_code, population, source, rn
       FROM ranked
       WHERE rn <= $2
       ORDER BY state_code, rn
