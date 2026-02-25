@@ -1,3 +1,92 @@
+#!/bin/bash
+# Fix: City preview now shows top 25 by population (matches generate-pages)
+# Run from repo root: ~/Downloads/continue-leads
+set -e
+
+echo "=== Fixing city preview sort order ==="
+echo ""
+
+# 1. Update /api/geo/cities endpoint (add sort param)
+echo "1/2  Updating /api/geo/cities endpoint with sort=population support..."
+cat > apps/admin/src/app/api/geo/cities/route.ts << 'ENDOFFILE'
+import { NextRequest, NextResponse } from 'next/server';
+import pool from '@/lib/pool';
+
+export const dynamic = 'force-dynamic';
+
+// GET /api/geo/cities?state=MA&county=Suffolk&q=bos&limit=50&sort=population
+// Search/filter cities with optional state, county, and text query
+// sort=population → ORDER BY population DESC (matches generate-pages ranking)
+// sort=name (default) → ORDER BY name ASC
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const state = searchParams.get('state')?.toUpperCase();
+    const county = searchParams.get('county');
+    const q = searchParams.get('q');
+    const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 500);
+    const sort = searchParams.get('sort');
+
+    const conditions: string[] = ['c.is_active = true'];
+    const values: any[] = [];
+    let paramIdx = 1;
+
+    if (state) {
+      conditions.push(`c.state_code = $${paramIdx++}`);
+      values.push(state);
+    }
+    if (county) {
+      conditions.push(`c.county_name ILIKE $${paramIdx++}`);
+      values.push(county);
+    }
+    if (q && q.length >= 2) {
+      conditions.push(`c.name ILIKE $${paramIdx++}`);
+      values.push(`${q}%`);
+    }
+
+    if (!state && !q) {
+      return NextResponse.json(
+        { error: 'Provide at least state or q (min 2 chars) parameter' },
+        { status: 400 }
+      );
+    }
+
+    values.push(limit);
+
+    const result = await pool.query(`
+      SELECT 
+        c.id,
+        c.name,
+        c.slug,
+        c.state_code,
+        c.county_name,
+        c.lat,
+        c.lng,
+        c.population,
+        (SELECT COUNT(*)::int FROM zip_codes z WHERE z.city_id = c.id) AS zip_count
+      FROM cities c
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY ${sort === 'population' ? 'c.population DESC NULLS LAST, c.name ASC' : 'c.name ASC'}
+      LIMIT $${paramIdx}
+    `, values);
+
+    return NextResponse.json({
+      cities: result.rows,
+      total: result.rows.length,
+      filters: { state, county, q, limit, sort: sort || 'name' },
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
+}
+
+ENDOFFILE
+echo "   ✅ Cities endpoint updated"
+
+# 2. Update Brand Launch Wizard (sort by population + rank column)
+echo "2/2  Updating Brand Launch Wizard city preview..."
+cat > apps/admin/src/app/brands/new/page.tsx << 'ENDOFFILE'
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
@@ -1087,3 +1176,21 @@ export default function BrandWizardPage() {
     </AuthLayout>
   );
 }
+ENDOFFILE
+echo "   ✅ Wizard updated"
+
+
+echo ""
+echo "=== Fix Complete ==="
+echo ""
+echo "Changes:"
+echo "  ✅ /api/geo/cities now supports ?sort=population"
+echo "  ✅ Wizard fetches cities sorted by population DESC"
+echo "  ✅ Preview table shows rank column (#)"
+echo "  ✅ Label: 'Top 25 Cities by Population'"
+echo "  ✅ Info note: 'These are the cities that will get pages generated'"
+echo ""
+echo "Next:"
+echo "  git add -A"
+echo "  git commit -m 'fix: city preview sorted by population to match generate-pages'"
+echo "  git push origin main"

@@ -3,8 +3,10 @@ import pool from '@/lib/pool';
 
 export const dynamic = 'force-dynamic';
 
-// GET /api/geo/cities?state=MA&county=Suffolk&q=bos&limit=50
+// GET /api/geo/cities?state=MA&county=Suffolk&q=bos&limit=50&sort=population
 // Search/filter cities with optional state, county, and text query
+// sort=population → ORDER BY population DESC (matches generate-pages ranking)
+// sort=name (default) → ORDER BY name ASC
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -12,6 +14,7 @@ export async function GET(request: NextRequest) {
     const county = searchParams.get('county');
     const q = searchParams.get('q');
     const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 500);
+    const sort = searchParams.get('sort');
 
     const conditions: string[] = ['c.is_active = true'];
     const values: any[] = [];
@@ -52,14 +55,14 @@ export async function GET(request: NextRequest) {
         (SELECT COUNT(*)::int FROM zip_codes z WHERE z.city_id = c.id) AS zip_count
       FROM cities c
       WHERE ${conditions.join(' AND ')}
-      ORDER BY c.name
+      ORDER BY ${sort === 'population' ? 'c.population DESC NULLS LAST, c.name ASC' : 'c.name ASC'}
       LIMIT $${paramIdx}
     `, values);
 
     return NextResponse.json({
       cities: result.rows,
       total: result.rows.length,
-      filters: { state, county, q, limit },
+      filters: { state, county, q, limit, sort: sort || 'name' },
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
