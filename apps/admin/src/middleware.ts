@@ -25,14 +25,17 @@ async function verifyToken(token: string, secret: string): Promise<boolean> {
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  // Public surface — must remain unauthenticated:
+  //   /login                  — login UI (otherwise infinite redirect)
+  //   /api/auth/*             — login/logout endpoints
+  //   /api/leads/capture      — public lead-form submit endpoint hit by
+  //                             embedded forms on brand sites
+  // Everything else (admin pages, /api/taxonomy, /api/geo, /api/brands,
+  // /api/admin, etc.) requires a valid cl_admin_session cookie.
   if (
     pathname === '/login' ||
     pathname.startsWith('/api/auth') ||
-    pathname.startsWith('/api/leads/capture') ||
-    pathname.startsWith('/api/taxonomy') ||
-    pathname.startsWith('/api/geo') ||
-    pathname.startsWith('/api/brands') ||
-    pathname.startsWith('/api/admin')
+    pathname.startsWith('/api/leads/capture')
   ) {
     return NextResponse.next();
   }
