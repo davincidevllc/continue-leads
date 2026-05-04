@@ -137,7 +137,7 @@ These block specific phases. Don't start the dependent phase without an answer.
 ## Database
 
 - **Geography (seeded):** 51 states, 3,128 counties, 27,607 cities, 31,459 ZIPs.
-  - `cities.population` is **not yet seeded** — Census ACS load needed before we trust population-sorted city ordering.
+  - `cities.population` **is seeded** (verified 2026-05-03 — Boston shows pop. 675,647). Used by `/api/brands/[id]/generate-pages` to rank cities for cap selection.
 - **Taxonomy (seeded):** 1 vertical (Home Improvement), 62 categories, 207 services, 90 question sets.
 - **Built schema (M001-M004):**
   - `sites`, `site_target_states`, `site_target_counties`, `site_target_zips`, `site_target_cities`
@@ -198,11 +198,11 @@ These block specific phases. Don't start the dependent phase without an answer.
 
 ## Known Issues / Tracked Cleanup
 
-- **Auth bypass on `/api/brands` and `/api/admin`** in `apps/admin/src/middleware.ts` — security gap, routes are unauthenticated. Closing this is part of Phase 1.
 - **Cruft directories** at repo root from past botched shell commands: `apps/for/`, `dir/`, `its/`, `{apps/`. Each contains files literally named `placeholder` and `cat > `. Clean up in a dedicated tidy commit when not mid-feature.
-- **`cities.population`** column unseeded — needs Census ACS load (~30 min job). Required before population-sorted city ordering is reliable.
 - **`cap_config.max_pages`** default of 500 may be wrong per missing Wave 1 Addendum.
 - **Bootstrap vs Tailwind in admin UI** — README says Bootstrap, Master Plan implies Tailwind. Verify which is in `apps/admin/` before any UI build task.
+- **Empty/malformed POSTs return HTTP 500** on `/api/auth/login` and `/api/leads/capture` — should return 400. Pre-existing, unrelated to recent changes. Hardening task.
+- **No `DELETE /api/brands/[id]` endpoint** — `DELETE /api/brands/[id]/pages` exists, but no way to delete a brand record itself via HTTP. Test brand `cl-e2e-painting-ma-20260503.com` (id `68adfd7a-42b4-48e8-9be0-b338cdcbbaa9`) is sitting in staging as a test artifact. Add endpoint when convenient.
 
 ## Last Session
 
