@@ -69,7 +69,8 @@ pnpm --filter @continue-leads/admin dev   # localhost:3000
 
 **Phase 0 — Foundation (current focus)**
 Plan: see `docs/phase-0-plan.md` (13 atomic tasks, 4 streams, ~6 bursts of 1-3h each).
-Critical path: RBAC-1 → RBAC-2 → RBAC-4. Telegram, Sentry, health endpoint can parallelize.
+**NEW Burst 0 (do FIRST, blocks RBAC):** Secrets migration. The ECS task def `cl-stg-admin:51` has all sensitive env vars in plaintext (`ADMIN_AUTH_SECRET`, `DB_PASSWORD`, `PII_ENCRYPTION_KEY`). Register a new revision that uses `secrets:` references to Secrets Manager for all sensitive vars. Rotate the values during the migration since they're effectively leaked. **Do this before RBAC-1** — RBAC will introduce new sensitive values (session signing keys, password pepper) and we want a working pattern in place first.
+Critical path: Secrets migration → RBAC-1 → RBAC-2 → RBAC-4. Telegram, Sentry, health endpoint can parallelize.
 1. RBAC — replace single shared password with users + roles (Admin/Ops/Sales/Dev), per-route gates, audit log. Bring permissions matrix to review before building.
 2. Telegram bot (AWS Lambda) — proactive alerts to a team Telegram group + inbound queries from Thiago. **Not WhatsApp.**
 3. Cost visibility dashboard — show estimated Claude API cost before every content batch; require typed confirmation when cost > $0 (i.e., always, for now).
@@ -204,7 +205,9 @@ These block specific phases. Don't start the dependent phase without an answer.
 
 ## Known Issues / Tracked Cleanup
 
+- **CRITICAL: All secrets are plaintext in the ECS task definition** (discovered 2026-05-05 while debugging staging login). The task def `cl-stg-admin:51` has `ADMIN_AUTH_SECRET`, `DB_PASSWORD`, `PII_ENCRYPTION_KEY` in the plain `environment` block — anyone with ECS read access sees them. The `cl-stg-app-secrets` Secrets Manager entry exists with `adminAuthSecret`/`kmsKeyId` keys, but the running app never reads it (no `secrets` block in the task def). Phase 0 must include a "secrets migration" task: register a new task def revision that uses `secrets:` references for all sensitive vars and remove them from `environment:`. The current ADMIN_AUTH_SECRET value is `ContinueLeads2026Staging` (not the `BasilioDeSouza12!` shown in Secrets Manager — that's actually the DB password). Treat both as compromised once we migrate; rotate at the same time.
 - **Session cookie still `secure: false`** in `apps/admin/src/lib/auth.ts:39`. Legacy from HTTP-era staging. Now that HTTPS is enforced (Phase 1 closed 2026-05-04), flip to `secure: true` so the cookie won't transmit over plain HTTP. Small one-file PR. Will be folded into Phase 0 RBAC-2 if not done sooner.
+- **Session cookie `SameSite=lax`** — Phase 0 RBAC-2 should bump to `SameSite=strict` for the admin app (no cross-site embeds expected).
 - **Cruft directories** at repo root from past botched shell commands: `apps/for/`, `dir/`, `its/`, `{apps/`. Each contains files literally named `placeholder` and `cat > `. Clean up in a dedicated tidy commit when not mid-feature.
 - **`cap_config.max_pages`** default of 500 may be wrong per missing Wave 1 Addendum.
 - **Bootstrap vs Tailwind in admin UI** — README says Bootstrap, Master Plan implies Tailwind. Verify which is in `apps/admin/` before any UI build task.
@@ -231,6 +234,7 @@ What was completed:
   - Verified: `curl -I https://admin.continueleads.com/login` returns HTTP/2 200, cert validates without `-k`, HTTP redirects to HTTPS.
 - **Phase 0 plan drafted** — `docs/phase-0-plan.md` (255 lines) on branch `docs/phase-0-plan`. Breaks Phase 0 into 13 atomic tasks across 4 streams (RBAC, Telegram, Cost dashboard, Monitoring). Includes dependency graph, recommended 6-burst sequence, exit criteria, decisions to confirm, risks/mitigations, and out-of-scope list.
 - **Git identity fixed** globally on this machine: `Thiago DeSouza <thiago@continueleads.com>`. Past merged commits with `@Thiagos-MacBook-Pro-2.local` left untouched (history rewrite not worth it).
+- **Discovered staging secrets are all plaintext in the ECS task def** (logged in Known Issues). Working ADMIN_AUTH_SECRET is `ContinueLeads2026Staging`. Force-redeploy of the ECS service was attempted to refresh from Secrets Manager — but the task def doesn't reference Secrets Manager at all, so this had no effect. New top-priority Phase 0 task added: secrets migration before RBAC work begins.
 
 What's in progress:
 
