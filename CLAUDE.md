@@ -1,7 +1,7 @@
 # Continue Leads — Claude Code Context
 
 > **Read this file in full before doing anything else.**
-> Last updated: 2026-05-02
+> Last updated: 2026-05-05
 
 ## Project
 
@@ -14,8 +14,9 @@ real-time ping-post auction to aggregators and direct buyers.
 
 - **Active local path:** `~/Downloads/continue-leads`
 - **GitHub:** `github.com/davincidevllc/continue-leads`
-- **Live admin (staging, no DNS yet):** `http://cl-stg-admin-alb-1165576223.us-east-1.elb.amazonaws.com`
-- **Hosting:** AWS only (ECS Fargate, RDS PostgreSQL, ALB, S3, CloudFront, Route 53). No DigitalOcean.
+- **Live admin (staging):** `https://admin.continueleads.com` — HTTP→HTTPS 301 redirect; ACM cert auto-renews, expires 2026-11-17. Backend ALB hostname is `cl-stg-admin-alb-1165576223.us-east-1.elb.amazonaws.com` (don't hit directly; cert is bound to the friendly name).
+- **Hosting:** AWS only (ECS Fargate, RDS PostgreSQL, ALB, S3, CloudFront, ACM). No DigitalOcean.
+- **DNS:** `continueleads.com` registered at name.com, **DNS delegated to Cloudflare** (`pat.ns.cloudflare.com`, `pete.ns.cloudflare.com`). All record changes go in Cloudflare dashboard, not name.com or Route 53. Email (Google Workspace MX) and admin subdomain are both there. ACM validation CNAMEs go in Cloudflare with **proxy off (gray cloud)**; orange cloud breaks ACM and direct ALB connections.
 - The `~/Desktop/continue-leads-cms/` directory on this machine is a **deprecated prototype** — do not edit, do not reference.
 
 ## Stack
@@ -61,16 +62,18 @@ pnpm --filter @continue-leads/admin dev   # localhost:3000
 
 ## Current Priorities (do these in order)
 
-**Phase 1 — Validation (in progress, do first)**
-1. E2E Wizard test — create test brand (Painting, MA, 25 city cap, pin Boston, exclude Springfield), verify targeting math, delete and confirm cascade.
-2. Tighten auth bypass — remove `/api/brands` and `/api/admin` from `middleware.ts` bypass list (security gap; routes are currently wide open).
-3. DNS fix — point `admin.continueleads.com` at the ALB.
+**Phase 1 — Validation (DONE 2026-05-04)**
+- ✓ E2E Wizard test passed against staging
+- ✓ Auth bypass tightened (PR #2 — only `/login`, `/api/auth/*`, `/api/leads/capture` are public now)
+- ✓ DNS + HTTPS — `https://admin.continueleads.com` live with valid ACM cert and HTTP→HTTPS redirect
 
-**Phase 0 — Foundation (after Phase 1)**
-4. RBAC on top of existing HMAC auth — four roles: Admin (Thiago), Ops (Isis), Sales (Joe), Dev. Bring a permissions matrix to review before building.
-5. Telegram bot (AWS Lambda) — proactive alerts to a team Telegram group + inbound queries from Thiago. **Not WhatsApp.**
-6. Cost visibility dashboard — show estimated Claude API cost before every content batch; require typed confirmation when cost > $0 (i.e., always, for now).
-7. Monitoring — CloudWatch alarms for ECS/RDS/queue depth + Sentry free tier for application exceptions.
+**Phase 0 — Foundation (current focus)**
+Plan: see `docs/phase-0-plan.md` (13 atomic tasks, 4 streams, ~6 bursts of 1-3h each).
+Critical path: RBAC-1 → RBAC-2 → RBAC-4. Telegram, Sentry, health endpoint can parallelize.
+1. RBAC — replace single shared password with users + roles (Admin/Ops/Sales/Dev), per-route gates, audit log. Bring permissions matrix to review before building.
+2. Telegram bot (AWS Lambda) — proactive alerts to a team Telegram group + inbound queries from Thiago. **Not WhatsApp.**
+3. Cost visibility dashboard — show estimated Claude API cost before every content batch; require typed confirmation when cost > $0 (i.e., always, for now).
+4. Monitoring — CloudWatch alarms for ECS/RDS/queue depth + Sentry free tier for application exceptions.
 
 **Phase 2 — Static Site Generator v1**
 8. Render `site_pages` rows to S3 as static HTML with full SEO layer (canonicals, schema, sitemap, robots, OG, GA4, GSC verification, UTM passthrough).
@@ -120,6 +123,9 @@ Decisions made during the kickoff session (2026-05-02). Revisit if assumptions c
 | Monitoring | CloudWatch alarms (infra) + Sentry free tier (app exceptions) | Phase 0 |
 | Branch policy | Branch + PR for any change touching 2+ files or production paths. Direct push to main only for typo/comment-only fixes | All work |
 | Working dir | `~/Downloads/continue-leads` | Confirmed 2026-05-02 |
+| DNS provider | Cloudflare (delegated from name.com registrar). All record changes in Cloudflare. ACM validation + ALB CNAMEs use **proxy off (gray cloud)** | Discovered 2026-05-04 — initially assumed Route 53. Email already on Cloudflare so migrating away would orphan MX. |
+| TLS strategy (admin) | ACM cert + ALB-terminated TLS, direct user → ALB (no Cloudflare proxy). HTTP:80 listener 301-redirects to HTTPS | Phase 1 close. Brand sites in Phase 3 may proxy through Cloudflare for WAF; admin stays direct. |
+| Git identity (commits) | `Thiago DeSouza <thiago@continueleads.com>` | Configured 2026-05-04 globally on this machine. Past commits with `@Thiagos-MacBook-Pro-2.local` left untouched (already merged). |
 
 ## Open Business Questions (unresolved)
 
@@ -198,34 +204,47 @@ These block specific phases. Don't start the dependent phase without an answer.
 
 ## Known Issues / Tracked Cleanup
 
+- **Session cookie still `secure: false`** in `apps/admin/src/lib/auth.ts:39`. Legacy from HTTP-era staging. Now that HTTPS is enforced (Phase 1 closed 2026-05-04), flip to `secure: true` so the cookie won't transmit over plain HTTP. Small one-file PR. Will be folded into Phase 0 RBAC-2 if not done sooner.
 - **Cruft directories** at repo root from past botched shell commands: `apps/for/`, `dir/`, `its/`, `{apps/`. Each contains files literally named `placeholder` and `cat > `. Clean up in a dedicated tidy commit when not mid-feature.
 - **`cap_config.max_pages`** default of 500 may be wrong per missing Wave 1 Addendum.
 - **Bootstrap vs Tailwind in admin UI** — README says Bootstrap, Master Plan implies Tailwind. Verify which is in `apps/admin/` before any UI build task.
 - **Empty/malformed POSTs return HTTP 500** on `/api/auth/login` and `/api/leads/capture` — should return 400. Pre-existing, unrelated to recent changes. Hardening task.
 - **No `DELETE /api/brands/[id]` endpoint** — `DELETE /api/brands/[id]/pages` exists, but no way to delete a brand record itself via HTTP. Test brand `cl-e2e-painting-ma-20260503.com` (id `68adfd7a-42b4-48e8-9be0-b338cdcbbaa9`) is sitting in staging as a test artifact. Add endpoint when convenient.
+- **Dead validation CNAME at name.com** — during Phase 1 DNS work, an ACM validation CNAME was added at name.com before discovering DNS is at Cloudflare. The record at name.com is inert (nameservers point to Cloudflare). Delete on next visit to name.com DNS panel.
+- **`gh` CLI not installed locally** — every PR creation requires the user to open the compare URL in a browser. ~30s per PR, but adds friction. Install via manual download (no `brew` on this machine) when there's spare time, then `gh auth login`. Token stored in macOS Keychain.
 
 ## Last Session
 
-**Session: 2026-05-02 — Kickoff**
+**Session: 2026-05-04 → 2026-05-05 — Phase 1 closeout + Phase 0 plan**
 
 What was completed:
-- Reviewed Project Summary PDF + Master Plan PDF.
-- Confirmed active repo at `~/Downloads/continue-leads` (NOT `~/Desktop/continue-leads-cms/`).
-- Read auth middleware, brands API, M004 schema, README — confirmed actual code state vs PDFs.
-- Made 11 product/process decisions (logged above).
-- Identified Phase 1 path: E2E test → auth tighten → DNS fix.
-- Identified Phase 0 plan: RBAC → Telegram bot → cost dashboard → monitoring.
-- Identified ~5 cleanup items (auth bypass, cruft dirs, cities.population, cap_config, Bootstrap vs Tailwind).
+
+- **PR #2 merged** (auth bypass tightened — only `/login`, `/api/auth/*`, `/api/leads/capture` are public; the rest of `/api/*` requires `cl_admin_session` cookie). Verified post-deploy via `curl` returning 307 → `/login` for `/api/brands`, `/api/admin`, etc.
+- **PR #3 merged** (CLAUDE.md fact corrections — removed false "cities.population not seeded" claim, removed resolved auth bypass from Known Issues, added two new tracked issues).
+- **Phase 1 Step D — DNS + HTTPS — complete.** End-to-end:
+  - ACM cert requested in `us-east-1` for `admin.continueleads.com`. ARN: `arn:aws:acm:us-east-1:768499314735:certificate/02c537e1-a125-474a-81ef-01776aca0f76`. DNS-validated. Issued, valid through 2026-11-17, auto-renews.
+  - **Discovered:** `continueleads.com` DNS is at Cloudflare, not Route 53. Initial CNAME placed at name.com was inert (nameservers point to Cloudflare). Re-added at Cloudflare with proxy OFF (gray cloud — required for ACM validation and direct ALB connections).
+  - HTTPS:443 listener added to `cl-stg-admin-alb` with the ACM cert and `ELBSecurityPolicy-TLS13-1-2-2021-06`.
+  - ALB security group `cl-stg-alb-sg` updated: inbound 443 from `0.0.0.0/0` and `::/0`.
+  - HTTP:80 listener changed from "Forward to target group" → "Redirect to URL" (HTTPS:443, HTTP_301, URI parts preserved).
+  - `admin` CNAME at Cloudflare → ALB hostname (DNS only, gray cloud).
+  - Verified: `curl -I https://admin.continueleads.com/login` returns HTTP/2 200, cert validates without `-k`, HTTP redirects to HTTPS.
+- **Phase 0 plan drafted** — `docs/phase-0-plan.md` (255 lines) on branch `docs/phase-0-plan`. Breaks Phase 0 into 13 atomic tasks across 4 streams (RBAC, Telegram, Cost dashboard, Monitoring). Includes dependency graph, recommended 6-burst sequence, exit criteria, decisions to confirm, risks/mitigations, and out-of-scope list.
+- **Git identity fixed** globally on this machine: `Thiago DeSouza <thiago@continueleads.com>`. Past merged commits with `@Thiagos-MacBook-Pro-2.local` left untouched (history rewrite not worth it).
 
 What's in progress:
-- CLAUDE.md (this file) just written. Awaiting Thiago review.
+
+- Branch `docs/phase-0-plan` committed but not yet pushed. PR to be opened for Thiago review (no merge required to start work — plan is reference, not gate).
 
 Next task:
-- Run Phase 1 E2E Wizard test (Steps B-C from kickoff plan): verify `pnpm install`, run a real `POST /api/brands` against staging RDS, validate targeting math, delete cleanly.
+
+- Open Phase 0 plan PR for review.
+- After review, pick first burst from the plan: **RBAC-1 (users + sessions + audit_log schema)**, ~45 min. Schema-only, sets up everything downstream.
 
 Open questions / blockers:
-- None blocking immediate next task.
-- Long-tail: TCPA copy, launch scope (1 vertical or 3), Wave 1 Addendum location.
+
+- Phase 0 plan has 4 explicit "Decisions to confirm" (bcrypt vs argon2id, session token strategy, Telegram channel structure, cost alert thresholds, Sentry vs alt, first admin email). Answer in plan-doc PR review or first burst.
+- Long-tail: TCPA copy, launch scope (1 vertical or 3), Wave 1 Addendum location, dead CNAME cleanup at name.com, `gh` CLI install.
 
 ---
 
