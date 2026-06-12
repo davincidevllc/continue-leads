@@ -5,10 +5,22 @@
 
 ## Project
 
-Lead generation platform. Programmatically generates local SEO landing pages
-(money pages = city × service combos) for service businesses. Each page gets a
-unique AI-generated body. Leads captured through embedded forms are sold via a
-real-time ping-post auction to aggregators and direct buyers.
+**Continue Leads is a multi-tenant SaaS platform** for programmatic local-SEO lead generation. Each tenant (customer company) operates their own set of "brands" — lead-gen-front websites that capture homeowners' contact info via city × service combination "money pages." Each page gets a unique AI-generated body. Leads are captured through embedded forms and sold via a real-time ping-post auction to contractors and aggregators.
+
+**Current tenants (planned):**
+- `internal` — Continue Leads' own ops / R&D
+- `leadsquad` — Tampa partners running their own lead-gen
+- `boston-co` — Joe + Isis's Boston operation (name TBD)
+
+Thiago (you) is a platform owner and also a partner at LeadSquad + Boston Co. The platform is designed so YOU can walk away from any partnership and the platform travels with you.
+
+**Core spec docs** (read before working on the related area):
+- [`docs/multi-tenancy-spec.md`](./docs/multi-tenancy-spec.md) — tenant model, RLS isolation, auth, URLs
+- [`docs/seo-aeo-strategy.md`](./docs/seo-aeo-strategy.md) — on-page kit, sitewide elements, blog, AEO patterns, schema, trust signals, TCPA
+- [`docs/duplicate-content-detection.md`](./docs/duplicate-content-detection.md) — Voyage embeddings, pgvector, QA integration, dashboard views
+- [`docs/image-strategy.md`](./docs/image-strategy.md) — per-tenant Flux pools, anti-clustering rules, approval workflow
+- [`docs/phase-0-plan.md`](./docs/phase-0-plan.md) — current phase: 7 streams, 22-30 hours, see for next task
+- [`docs/session-protocol.md`](./docs/session-protocol.md) — how to start and end a session efficiently
 
 ## Repo & Environment
 
@@ -68,13 +80,20 @@ pnpm --filter @continue-leads/admin dev   # localhost:3000
 - ✓ DNS + HTTPS — `https://admin.continueleads.com` live with valid ACM cert and HTTP→HTTPS redirect
 
 **Phase 0 — Foundation (current focus)**
-Plan: see `docs/phase-0-plan.md` (13 atomic tasks, 4 streams, ~6 bursts of 1-3h each).
-**NEW Burst 0 (do FIRST, blocks RBAC):** Secrets migration. The ECS task def `cl-stg-admin:51` has all sensitive env vars in plaintext (`ADMIN_AUTH_SECRET`, `DB_PASSWORD`, `PII_ENCRYPTION_KEY`). Register a new revision that uses `secrets:` references to Secrets Manager for all sensitive vars. Rotate the values during the migration since they're effectively leaked. **Do this before RBAC-1** — RBAC will introduce new sensitive values (session signing keys, password pepper) and we want a working pattern in place first.
-Critical path: Secrets migration → RBAC-1 → RBAC-2 → RBAC-4. Telegram, Sentry, health endpoint can parallelize.
-1. RBAC — replace single shared password with users + roles (Admin/Ops/Sales/Dev), per-route gates, audit log. Bring permissions matrix to review before building.
-2. Telegram bot (AWS Lambda) — proactive alerts to a team Telegram group + inbound queries from Thiago. **Not WhatsApp.**
-3. Cost visibility dashboard — show estimated Claude API cost before every content batch; require typed confirmation when cost > $0 (i.e., always, for now).
-4. Monitoring — CloudWatch alarms for ECS/RDS/queue depth + Sentry free tier for application exceptions.
+Plan: see `docs/phase-0-plan.md` (revised 2026-05-XX, ~22-30 hours across 7-9 bursts).
+
+Stream sequence — strict order:
+
+1. **Burst 0a — Secrets migration** (2-3h). Move `ADMIN_AUTH_SECRET`, `DB_PASSWORD`, `PII_ENCRYPTION_KEY` from plaintext ECS task def to Secrets Manager refs. Rotate during migration.
+2. **Burst 0b — Multi-tenancy** (12-15h, splits into 4 sub-bursts). Full multi-tenant model: schema + RLS + auth + tenant management UI. See `docs/multi-tenancy-spec.md` for 11 atomic tasks (MT-1 through MT-11).
+3. **Burst 0c — Tenant dashboard** (3h). First visible UI a tenant user sees on login. Role-based metrics view; makes the platform look like a product.
+4. **Burst 0d — Telegram bot** (2h). One platform bot, per-tenant chat IDs.
+5. **Burst 0e — Monitoring** (2-3h). Sentry + CloudWatch alarms + Telegram routing.
+6. **Burst 0f — Cost dashboard** (3-4h). Per-tenant Claude/Flux/AWS spend visibility + platform rollup.
+
+**Critical path:** Secrets migration → Multi-tenancy → everything else can parallelize.
+
+The old RBAC stream from the previous Phase 0 plan is REPLACED by the multi-tenancy work — roles now live inside tenants. Don't reach for the old `docs/phase-0-plan` branch (now superseded).
 
 **Phase 2 — Static Site Generator v1**
 8. Render `site_pages` rows to S3 as static HTML with full SEO layer (canonicals, schema, sitemap, robots, OG, GA4, GSC verification, UTM passthrough).
@@ -127,6 +146,24 @@ Decisions made during the kickoff session (2026-05-02). Revisit if assumptions c
 | DNS provider | Cloudflare (delegated from name.com registrar). All record changes in Cloudflare. ACM validation + ALB CNAMEs use **proxy off (gray cloud)** | Discovered 2026-05-04 — initially assumed Route 53. Email already on Cloudflare so migrating away would orphan MX. |
 | TLS strategy (admin) | ACM cert + ALB-terminated TLS, direct user → ALB (no Cloudflare proxy). HTTP:80 listener 301-redirects to HTTPS | Phase 1 close. Brand sites in Phase 3 may proxy through Cloudflare for WAF; admin stays direct. |
 | Git identity (commits) | `Thiago DeSouza <thiago@continueleads.com>` | Configured 2026-05-04 globally on this machine. Past commits with `@Thiagos-MacBook-Pro-2.local` left untouched (already merged). |
+| **Platform model** | Multi-tenant SaaS; LeadSquad + Boston Co + future are tenants | 2026-05-XX — fundamental architecture pivot from single-tenant assumptions |
+| **Tenant code term** | `tenant` (not `account`, not `company`) | 2026-05-XX — chosen to avoid collisions with "account" and "company" elsewhere |
+| **Isolation strategy** | Postgres Row-Level Security (RLS) + tenant-scoped DB roles | DB enforces; app code can't accidentally leak cross-tenant data |
+| **URL structure** | `admin.continueleads.com` for platform admin, `{slug}.continueleads.com` per tenant | Wildcard ACM cert needed |
+| **Session expiration** | 12 hours, uniform for platform and tenant users | Will lift to 7d for tenant + 2FA-gated 7d for platform when 2FA lands |
+| **Tenant lifecycle** | Two states: ACTIVE, DELETED. DELETED blocks tenant-user login but everything else keeps running; platform admin retains full access | Manual SQL only for hard delete |
+| **Image generation** | Flux schnell via API; each tenant brings their own API key | DALL-E 3 considered for future quality upgrade |
+| **Image pool ownership** | Per-tenant per-vertical (v1); per-brand (v2 when brand is spun up) | No cross-tenant image sharing — every tenant pays for and owns their own imagery |
+| **Image approver** | Per-tenant assigned user: LeadSquad = one of their partners, Boston Co = Gerry, default = tenant Admin | Sample review of 10% per batch |
+| **Five-star display** | Decorative stars with framing like "Quality Service Guaranteed" — no rating-count claim | FTC-defensible posture; deferred reviews collection to v2 |
+| **TCPA consent UX** | "By clicking" implied consent (no checkbox) above submit button | Stronger legal posture than checkbox |
+| **Duplicate detection** | Voyage `voyage-3-lite` embeddings + pgvector; 0.85 block / 0.75 warn thresholds | Per-tenant tunable; cross-tenant comparison explicitly OFF |
+| **Off-page SEO** | Out of scope for v1 (brands are lead-gen fronts, not real businesses) | Revisit when we have enterprise tenant wanting branded sites |
+| **Blog content source** | AI-only initially; per-brand toggle (AI / hybrid / human) added in future | Cadence: 2-4 posts/week per brand |
+| **Domain ownership** | Thiago personally owns all brand domains by default (sticky leverage); tenant can opt to own their own | Transferable later via platform admin action |
+| **Email forwarding for brand domains** | ImprovMX catch-all v1; AWS SES + Lambda parser for v2 (email-as-lead) | Free tier covers first 25 domains |
+| **Embedding storage** | pgvector inside existing RDS — no separate vector DB | Zero infra cost |
+| **Approval workflow** | Auto-generation + required tenant-level approval before images go usable | Per-tenant approver |
 
 ## Open Business Questions (unresolved)
 
@@ -157,17 +194,32 @@ These block specific phases. Don't start the dependent phase without an answer.
 
 ## Assets
 
-- Brand logos: provided by Gerry per brand → `/assets/brands/[brand-id]/`.
-- Page images: AI-generated, provided by Gerry per vertical → `/assets/[vertical]/`.
+See `docs/image-strategy.md` for the full spec. Quick summary:
+
+- **Brand logos:** provided by Gerry per brand (or whichever designer the tenant uses) → `s3://cl-images/{tenant-slug}/brands/{brand-id}/logo.webp`. Manual delivery, one per brand.
+- **Page images:** AI-generated per tenant per vertical via Flux schnell API. Each tenant brings their own Flux API key. Pool of 200 images per tenant per vertical, refreshed quarterly. Tenant approver reviews 10% sample before images go usable. Storage: `s3://cl-images/{tenant-slug}/{vertical-slug}/[uuid].webp`.
 - All assets via CloudFront, WebP, max 200KB, responsive srcset auto-generated.
+- Anti-clustering rules enforced in page assignment so the same image never appears on too many pages within a brand.
 
 ## Team
 
-- **Thiago** — founder, technical lead. Working with you (Claude Code). Role: Admin.
-- **Gerry** — UI/UX (Figma, Philippines). Delivers designs, brand logos, AI-generated images.
-- **Joe** — sales/BD. Role: Sales (read-only leads + revenue dashboard).
-- **Isis** — ops director candidate. Role: Ops (QA review, lead management, brand status).
-- **2 full-stack devs** (Philippines, via Outsourcey). Role: Dev.
+### Platform level (Continue Leads)
+
+- **Thiago** — founder, platform owner, technical lead. Working with you (Claude Code). Platform User (super-admin across all tenants). Also partner at LeadSquad + Boston Co.
+
+### Tenants and tenant users
+
+- **`internal` tenant** — Continue Leads' own ops. Thiago is the only user.
+- **`leadsquad` tenant** — Tampa partners (names TBD). The LeadSquad partners run lead-gen via the platform; one of them is the assigned image approver for that tenant.
+- **`boston-co` tenant** (name TBD until Joe + Isis decide):
+  - **Joe** — sales/BD. Role: Sales (read-only leads + revenue dashboard).
+  - **Isis** — ops director candidate. Role: Ops (QA review, lead management, brand status).
+  - **Gerry** — image approver only (designer in Philippines, also delivers brand logos + Figma page designs for tenants that contract him).
+
+### Shared contractors (used by tenants that hire them)
+
+- **Gerry** — UI/UX (Figma, Philippines). Delivers brand logos (per brand), page template designs (per vertical), image batch approval for tenants where he's the assigned approver. NOT platform staff — he's contracted by individual tenants.
+- **2 full-stack devs** (Philippines, via Outsourcey). Dev role within whichever tenant contracts them. Could also be platform contractors helping Thiago directly.
 
 ## Telegram Bot (Phase 0, not built)
 
@@ -218,37 +270,53 @@ These block specific phases. Don't start the dependent phase without an answer.
 
 ## Last Session
 
-**Session: 2026-05-04 → 2026-05-05 — Phase 1 closeout + Phase 0 plan**
+**Session: 2026-05-XX — Platform architecture v2 (multi-tenant pivot)**
 
 What was completed:
 
-- **PR #2 merged** (auth bypass tightened — only `/login`, `/api/auth/*`, `/api/leads/capture` are public; the rest of `/api/*` requires `cl_admin_session` cookie). Verified post-deploy via `curl` returning 307 → `/login` for `/api/brands`, `/api/admin`, etc.
-- **PR #3 merged** (CLAUDE.md fact corrections — removed false "cities.population not seeded" claim, removed resolved auth bypass from Known Issues, added two new tracked issues).
-- **Phase 1 Step D — DNS + HTTPS — complete.** End-to-end:
-  - ACM cert requested in `us-east-1` for `admin.continueleads.com`. ARN: `arn:aws:acm:us-east-1:768499314735:certificate/02c537e1-a125-474a-81ef-01776aca0f76`. DNS-validated. Issued, valid through 2026-11-17, auto-renews.
-  - **Discovered:** `continueleads.com` DNS is at Cloudflare, not Route 53. Initial CNAME placed at name.com was inert (nameservers point to Cloudflare). Re-added at Cloudflare with proxy OFF (gray cloud — required for ACM validation and direct ALB connections).
-  - HTTPS:443 listener added to `cl-stg-admin-alb` with the ACM cert and `ELBSecurityPolicy-TLS13-1-2-2021-06`.
-  - ALB security group `cl-stg-alb-sg` updated: inbound 443 from `0.0.0.0/0` and `::/0`.
-  - HTTP:80 listener changed from "Forward to target group" → "Redirect to URL" (HTTPS:443, HTTP_301, URI parts preserved).
-  - `admin` CNAME at Cloudflare → ALB hostname (DNS only, gray cloud).
-  - Verified: `curl -I https://admin.continueleads.com/login` returns HTTP/2 200, cert validates without `-k`, HTTP redirects to HTTPS.
-- **Phase 0 plan drafted** — `docs/phase-0-plan.md` (255 lines) on branch `docs/phase-0-plan`. Breaks Phase 0 into 13 atomic tasks across 4 streams (RBAC, Telegram, Cost dashboard, Monitoring). Includes dependency graph, recommended 6-burst sequence, exit criteria, decisions to confirm, risks/mitigations, and out-of-scope list.
-- **Git identity fixed** globally on this machine: `Thiago DeSouza <thiago@continueleads.com>`. Past merged commits with `@Thiagos-MacBook-Pro-2.local` left untouched (history rewrite not worth it).
-- **Discovered staging secrets are all plaintext in the ECS task def** (logged in Known Issues). Working ADMIN_AUTH_SECRET is `ContinueLeads2026Staging`. Force-redeploy of the ECS service was attempted to refresh from Secrets Manager — but the task def doesn't reference Secrets Manager at all, so this had no effect. New top-priority Phase 0 task added: secrets migration before RBAC work begins.
+- **Five new spec docs written**, all on branch `docs/platform-architecture-specs`:
+  - `docs/multi-tenancy-spec.md` (~440 lines): tenant model, RLS isolation, two-state lifecycle (ACTIVE / DELETED), URL strategy (`{slug}.continueleads.com`), wildcard ACM cert plan, platform vs tenant users, impersonation flow, 11 atomic implementation tasks (MT-1 through MT-11), migration path from single-tenant
+  - `docs/duplicate-content-detection.md` (~330 lines): Voyage `voyage-3-lite` embeddings, pgvector storage, 0.85/0.75 thresholds, six dashboard views (heatmap, within-brand grid, alert queue, page-pair compare, trend chart), QA Agent integration, 10 atomic tasks
+  - `docs/image-strategy.md` (~410 lines): Flux schnell provider, per-tenant pools (200 images), tenant brings own API key, per-tenant approval workflow, anti-clustering rules, v2 per-brand roadmap, 9 atomic tasks
+  - `docs/seo-aeo-strategy.md` (~600 lines): 36 mandatory per-page elements, sitewide elements, 8 content layers, blog system (NEW from Master Plan), internal linking architecture, schema library, trust signal kit, TCPA copy draft, 24 atomic tasks
+  - `docs/session-protocol.md` (~280 lines): 60-second session opener, master "where things live" map, iCloud Keychain organization, common gotchas runbook, end-of-session wrap-up protocol
+- **Phase 0 plan rewritten** (`docs/phase-0-plan.md` on this branch, supersedes the version on `docs/phase-0-plan`): 7 streams across 7-9 bursts, ~22-30 hours total. Multi-tenancy replaces RBAC stream entirely.
+- **CLAUDE.md substantially updated**: project description now multi-tenant; 18 new Decisions Log entries; Team section restructured to platform / tenant / contractor levels; Phase 0 priorities replaced; references to all five new spec docs in the header.
+
+Architectural decisions locked during this session:
+
+- **Continue Leads is a platform**, not a single business. LeadSquad (Tampa) and Boston Co (Joe + Isis) are tenants. Designed so Thiago can walk away from any partnership.
+- **Tenant isolation via Postgres RLS** — DB enforces, app code can't accidentally leak.
+- **Subdomain per tenant** — `{slug}.continueleads.com`. Wildcard ACM cert required.
+- **One-bot Telegram with per-tenant routing** (chat ID per tenant in `tenants.settings`).
+- **Per-tenant image generation** — each tenant brings their own Flux API key; pools are tenant-scoped, never shared.
+- **Per-tenant approver workflow** — LeadSquad: a partner; Boston Co: Gerry; default: tenant Admin.
+- **Trust signals**: 5-star decorative with "Quality Service Guaranteed" framing (FTC-defensible); background-checked badge (true via buyer vetting); no fake reviews.
+- **TCPA via implied consent** ("By clicking" language) above submit button, no checkbox.
+- **Off-page SEO out of scope** for v1 (brands are lead-gen fronts, not real businesses).
+- **Duplicate detection cross-tenant comparison is OFF** by design (isolation guarantee).
+- **Blog system added** to SEO scope (was missing from Master Plan): 2-4 posts/week per brand, AI-only initially, tenant-configurable later.
+- **Domain ownership stays with Thiago** by default (sticky leverage); tenants can opt to own their own.
 
 What's in progress:
 
-- Branch `docs/phase-0-plan` committed but not yet pushed. PR to be opened for Thiago review (no merge required to start work — plan is reference, not gate).
+- Branch `docs/platform-architecture-specs` ready to commit and open PR. Five new docs + Phase 0 plan revision + CLAUDE.md updates.
+- Old branches superseded by this PR: `docs/phase-0-plan` (Phase 0 plan now rewritten) and `docs/claude-md-phase-1-closeout` (CLAUDE.md updates merged into this branch). Both should be closed when this PR lands.
 
-Next task:
+Next task (when Thiago resumes):
 
-- Open Phase 0 plan PR for review.
-- After review, pick first burst from the plan: **RBAC-1 (users + sessions + audit_log schema)**, ~45 min. Schema-only, sets up everything downstream.
+- Review the five spec docs (start with `multi-tenancy-spec.md` — it's foundational, others reference it)
+- Merge this PR
+- Start **Burst 0a — Secrets migration** (2-3 hours). See `docs/phase-0-plan.md` for SEC-1, SEC-2, SEC-3.
+- The next session opener should follow `docs/session-protocol.md`.
 
-Open questions / blockers:
+Open questions / blockers (now in Phase 0 plan):
 
-- Phase 0 plan has 4 explicit "Decisions to confirm" (bcrypt vs argon2id, session token strategy, Telegram channel structure, cost alert thresholds, Sentry vs alt, first admin email). Answer in plan-doc PR review or first burst.
-- Long-tail: TCPA copy, launch scope (1 vertical or 3), Wave 1 Addendum location, dead CNAME cleanup at name.com, `gh` CLI install.
+- Telegram personal account vs dedicated CL bot account
+- Joe / Isis Telegram cadence (Boston Co alerts from day 1?)
+- LeadSquad provisioning order (before or after Boston Co?)
+- First-tenant demo seed data (sample brands in DRAFT for the dashboard?)
+- TCPA copy still placeholder, blocked on attorney review
 
 ---
 
