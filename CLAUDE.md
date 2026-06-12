@@ -1,7 +1,7 @@
 # Continue Leads — Claude Code Context
 
 > **Read this file in full before doing anything else.**
-> Last updated: 2026-05-05
+> Last updated: 2026-06-12
 
 ## Project
 
@@ -164,6 +164,7 @@ Decisions made during the kickoff session (2026-05-02). Revisit if assumptions c
 | **Email forwarding for brand domains** | ImprovMX catch-all v1; AWS SES + Lambda parser for v2 (email-as-lead) | Free tier covers first 25 domains |
 | **Embedding storage** | pgvector inside existing RDS — no separate vector DB | Zero infra cost |
 | **Approval workflow** | Auto-generation + required tenant-level approval before images go usable | Per-tenant approver |
+| **Secrets storage (staging)** | `cl-stg-app-secrets` JSON with keys `ADMIN_AUTH_SECRET`, `DB_PASSWORD`, `PII_ENCRYPTION_KEY`. ECS task def `cl-stg-admin:53+` references via `secrets:` block. Execution role `cl-stg-admin-exec-role` has `secrets-access` inline policy granting `secretsmanager:GetSecretValue` on the secret. | Burst 0a complete 2026-06-12. All three values rotated during migration; old values treated as compromised. New values backed up in iCloud Keychain under `CL — Staging *` entries. |
 
 ## Open Business Questions (unresolved)
 
@@ -257,7 +258,7 @@ See `docs/image-strategy.md` for the full spec. Quick summary:
 
 ## Known Issues / Tracked Cleanup
 
-- **CRITICAL: All secrets are plaintext in the ECS task definition** (discovered 2026-05-05 while debugging staging login). The task def `cl-stg-admin:51` has `ADMIN_AUTH_SECRET`, `DB_PASSWORD`, `PII_ENCRYPTION_KEY` in the plain `environment` block — anyone with ECS read access sees them. The `cl-stg-app-secrets` Secrets Manager entry exists with `adminAuthSecret`/`kmsKeyId` keys, but the running app never reads it (no `secrets` block in the task def). Phase 0 must include a "secrets migration" task: register a new task def revision that uses `secrets:` references for all sensitive vars and remove them from `environment:`. The current ADMIN_AUTH_SECRET value is `ContinueLeads2026Staging` (not the `BasilioDeSouza12!` shown in Secrets Manager — that's actually the DB password). Treat both as compromised once we migrate; rotate at the same time.
+- **`cl-stg-db-credentials` Secrets Manager entry is incomplete** — it has `host`, `port`, `dbname`, `username` but no `password`. The app reads `DB_PASSWORD` from `cl-stg-app-secrets` instead. Either (a) sync the current password into this secret so it's a complete connection record, or (b) delete this orphan secret entirely. Future improvement: refactor the app to read all four DB connection values from one secret instead of mixing env + secret. Low priority.
 - **Session cookie still `secure: false`** in `apps/admin/src/lib/auth.ts:39`. Legacy from HTTP-era staging. Now that HTTPS is enforced (Phase 1 closed 2026-05-04), flip to `secure: true` so the cookie won't transmit over plain HTTP. Small one-file PR. Will be folded into Phase 0 RBAC-2 if not done sooner.
 - **Session cookie `SameSite=lax`** — Phase 0 RBAC-2 should bump to `SameSite=strict` for the admin app (no cross-site embeds expected).
 - **Cruft directories** at repo root from past botched shell commands: `apps/for/`, `dir/`, `its/`, `{apps/`. Each contains files literally named `placeholder` and `cat > `. Clean up in a dedicated tidy commit when not mid-feature.
@@ -270,53 +271,39 @@ See `docs/image-strategy.md` for the full spec. Quick summary:
 
 ## Last Session
 
-**Session: 2026-05-XX — Platform architecture v2 (multi-tenant pivot)**
+**Session: 2026-06-12 — Burst 0a (Secrets migration) complete**
 
 What was completed:
 
-- **Five new spec docs written**, all on branch `docs/platform-architecture-specs`:
-  - `docs/multi-tenancy-spec.md` (~440 lines): tenant model, RLS isolation, two-state lifecycle (ACTIVE / DELETED), URL strategy (`{slug}.continueleads.com`), wildcard ACM cert plan, platform vs tenant users, impersonation flow, 11 atomic implementation tasks (MT-1 through MT-11), migration path from single-tenant
-  - `docs/duplicate-content-detection.md` (~330 lines): Voyage `voyage-3-lite` embeddings, pgvector storage, 0.85/0.75 thresholds, six dashboard views (heatmap, within-brand grid, alert queue, page-pair compare, trend chart), QA Agent integration, 10 atomic tasks
-  - `docs/image-strategy.md` (~410 lines): Flux schnell provider, per-tenant pools (200 images), tenant brings own API key, per-tenant approval workflow, anti-clustering rules, v2 per-brand roadmap, 9 atomic tasks
-  - `docs/seo-aeo-strategy.md` (~600 lines): 36 mandatory per-page elements, sitewide elements, 8 content layers, blog system (NEW from Master Plan), internal linking architecture, schema library, trust signal kit, TCPA copy draft, 24 atomic tasks
-  - `docs/session-protocol.md` (~280 lines): 60-second session opener, master "where things live" map, iCloud Keychain organization, common gotchas runbook, end-of-session wrap-up protocol
-- **Phase 0 plan rewritten** (`docs/phase-0-plan.md` on this branch, supersedes the version on `docs/phase-0-plan`): 7 streams across 7-9 bursts, ~22-30 hours total. Multi-tenancy replaces RBAC stream entirely.
-- **CLAUDE.md substantially updated**: project description now multi-tenant; 18 new Decisions Log entries; Team section restructured to platform / tenant / contractor levels; Phase 0 priorities replaced; references to all five new spec docs in the header.
+- **All three plaintext secrets migrated to AWS Secrets Manager:** `ADMIN_AUTH_SECRET`, `DB_PASSWORD`, `PII_ENCRYPTION_KEY` now live as JSON keys under `cl-stg-app-secrets`. ECS task def revision **53** (was on 52 — CLAUDE.md said 51, slight drift) references them via `secrets:` block; the three values are removed from `environment:`.
+- **All three values rotated during migration.** Old values (`ContinueLeads2026Staging` for ADMIN_AUTH_SECRET, `BasilioDeSouza12!` for DB_PASSWORD, unknown for PII_ENCRYPTION_KEY since not yet used) treated as compromised. New values generated via `openssl rand`, stored in iCloud Keychain under `CL — Staging *` entries per session-protocol.md.
+- **RDS master password updated** to match the new `DB_PASSWORD` value. Self-managed (not RDS-managed credentials — confirmed via the absence of "Managed in Secrets Manager" label on the RDS instance page).
+- **IAM execution role** `cl-stg-admin-exec-role` already had a customer-inline policy `secrets-access` granting `secretsmanager:GetSecretValue` on `arn:aws:secretsmanager:us-east-1:768499314735:secret:cl-stg-app-secrets-pUvqDq` — no policy edit needed.
+- **Force-deployed ECS service** to revision 53. New task came up healthy in ~2 minutes. Old task drained. Login verified at `https://admin.continueleads.com` with new `ADMIN_AUTH_SECRET`. Dashboard rendered DB-backed data (Sites: 4, Active Metros: 5) proving the new `DB_PASSWORD` reaches the app and RDS accepts it.
+- **Known Issues entry "CRITICAL: All secrets are plaintext" removed** from this file. Replaced with smaller cleanup item about `cl-stg-db-credentials` being incomplete (no password key) — low priority.
+- **Decisions Log entry added** documenting the staging secrets layout.
 
-Architectural decisions locked during this session:
+Architectural decisions confirmed (no new ones — execution of existing plan):
 
-- **Continue Leads is a platform**, not a single business. LeadSquad (Tampa) and Boston Co (Joe + Isis) are tenants. Designed so Thiago can walk away from any partnership.
-- **Tenant isolation via Postgres RLS** — DB enforces, app code can't accidentally leak.
-- **Subdomain per tenant** — `{slug}.continueleads.com`. Wildcard ACM cert required.
-- **One-bot Telegram with per-tenant routing** (chat ID per tenant in `tenants.settings`).
-- **Per-tenant image generation** — each tenant brings their own Flux API key; pools are tenant-scoped, never shared.
-- **Per-tenant approver workflow** — LeadSquad: a partner; Boston Co: Gerry; default: tenant Admin.
-- **Trust signals**: 5-star decorative with "Quality Service Guaranteed" framing (FTC-defensible); background-checked badge (true via buyer vetting); no fake reviews.
-- **TCPA via implied consent** ("By clicking" language) above submit button, no checkbox.
-- **Off-page SEO out of scope** for v1 (brands are lead-gen fronts, not real businesses).
-- **Duplicate detection cross-tenant comparison is OFF** by design (isolation guarantee).
-- **Blog system added** to SEO scope (was missing from Master Plan): 2-4 posts/week per brand, AI-only initially, tenant-configurable later.
-- **Domain ownership stays with Thiago** by default (sticky leverage); tenants can opt to own their own.
+- Per-secret JSON key reference syntax (`arn:...:cl-stg-app-secrets-XXX:KEY::`) works cleanly; ECS task def stays readable.
+- Brief deploy-window outage (~1-3 min between RDS password change and new task being healthy) is acceptable for staging. For prod-tier rollouts we'd want a slower rolling deploy with RDS-managed credentials.
 
 What's in progress:
 
-- Branch `docs/platform-architecture-specs` ready to commit and open PR. Five new docs + Phase 0 plan revision + CLAUDE.md updates.
-- Old branches superseded by this PR: `docs/phase-0-plan` (Phase 0 plan now rewritten) and `docs/claude-md-phase-1-closeout` (CLAUDE.md updates merged into this branch). Both should be closed when this PR lands.
+- Nothing. Working tree clean on `main` (with this closeout PR pending merge).
 
 Next task (when Thiago resumes):
 
-- Review the five spec docs (start with `multi-tenancy-spec.md` — it's foundational, others reference it)
-- Merge this PR
-- Start **Burst 0a — Secrets migration** (2-3 hours). See `docs/phase-0-plan.md` for SEC-1, SEC-2, SEC-3.
-- The next session opener should follow `docs/session-protocol.md`.
+- **Burst 0b.1 — Multi-tenancy schema + isolation** (~3 hours). MT-1 (schema migration), MT-2 (DB roles + RLS), MT-3 (backfill + NOT NULL). Spec: `docs/multi-tenancy-spec.md`. Plan: `docs/phase-0-plan.md`.
+- Open the session with `docs/session-protocol.md` 60-second opener.
 
-Open questions / blockers (now in Phase 0 plan):
+Open questions / blockers (carried over):
 
-- Telegram personal account vs dedicated CL bot account
-- Joe / Isis Telegram cadence (Boston Co alerts from day 1?)
-- LeadSquad provisioning order (before or after Boston Co?)
-- First-tenant demo seed data (sample brands in DRAFT for the dashboard?)
-- TCPA copy still placeholder, blocked on attorney review
+- Telegram personal account vs dedicated CL bot account (Burst 0d).
+- Joe / Isis Telegram cadence (Burst 0d).
+- LeadSquad provisioning order (Burst 0b.3).
+- First-tenant demo seed data — sample brands in DRAFT for the dashboard (Burst 0c)?
+- TCPA copy still placeholder, blocked on attorney review (Phase 2).
 
 ---
 
