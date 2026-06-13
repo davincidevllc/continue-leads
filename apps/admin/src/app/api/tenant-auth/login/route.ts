@@ -68,20 +68,23 @@ export async function POST(request: NextRequest) {
     }
 
     const user = await withPlatformContext(async (client) => {
-      const result = await client.query<{
-        id: string;
-        email: string;
-        display_name: string | null;
-        role: 'admin' | 'ops' | 'sales' | 'dev';
-        password_hash: string;
-      }>(
+      const result = await client.query(
         `SELECT id, email, display_name, role, password_hash
            FROM tenant_users
           WHERE tenant_id = $1 AND email = $2 AND is_active = true
           LIMIT 1`,
         [tenant.id, email]
       );
-      return result.rows[0] ?? null;
+      const row = result.rows[0] as
+        | {
+            id: string;
+            email: string;
+            display_name: string | null;
+            role: 'admin' | 'ops' | 'sales' | 'dev';
+            password_hash: string;
+          }
+        | undefined;
+      return row ?? null;
     });
 
     // Constant-ish-time check (see platform login for rationale).

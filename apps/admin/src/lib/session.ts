@@ -101,14 +101,7 @@ export async function loadSessionByToken(rawToken: string): Promise<LoadedSessio
   const tokenHash = hashToken(rawToken);
 
   return withPlatformContext(async (client) => {
-    const result = await client.query<{
-      id: string;
-      user_type: 'platform' | 'tenant';
-      platform_user_id: string | null;
-      tenant_user_id: string | null;
-      tenant_id: string | null;
-      expires_at: Date;
-    }>(
+    const result = await client.query(
       `SELECT id, user_type, platform_user_id, tenant_user_id, tenant_id, expires_at
          FROM sessions
         WHERE token_hash = $1
@@ -117,7 +110,16 @@ export async function loadSessionByToken(rawToken: string): Promise<LoadedSessio
       [tokenHash]
     );
 
-    const row = result.rows[0];
+    const row = result.rows[0] as
+      | {
+          id: string;
+          user_type: 'platform' | 'tenant';
+          platform_user_id: string | null;
+          tenant_user_id: string | null;
+          tenant_id: string | null;
+          expires_at: Date;
+        }
+      | undefined;
     if (!row) return null;
 
     // Best-effort touch — non-blocking; ignore failure.

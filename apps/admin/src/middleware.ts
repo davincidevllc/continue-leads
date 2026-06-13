@@ -92,7 +92,7 @@ function isAlwaysPublic(pathname: string): boolean {
     pathname.startsWith('/api/platform-auth/') ||        // MT-6 platform login
     pathname.startsWith('/api/tenant-auth/') ||          // MT-7 tenant login
     pathname.startsWith('/api/leads/capture') ||         // public lead-form endpoint
-    pathname === '/api/health'                           // MON-2 health endpoint (ALB probe)
+    pathname === '/api/health'                           // MON-2 health endpoint (ALB + uptime probes)
   );
 }
 

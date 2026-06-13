@@ -60,19 +60,22 @@ export async function POST(request: NextRequest) {
 
   try {
     const user = await withPlatformContext(async (client) => {
-      const result = await client.query<{
-        id: string;
-        email: string;
-        display_name: string | null;
-        password_hash: string;
-      }>(
+      const result = await client.query(
         `SELECT id, email, display_name, password_hash
            FROM platform_users
           WHERE email = $1 AND is_active = true
           LIMIT 1`,
         [email]
       );
-      return result.rows[0] ?? null;
+      const row = result.rows[0] as
+        | {
+            id: string;
+            email: string;
+            display_name: string | null;
+            password_hash: string;
+          }
+        | undefined;
+      return row ?? null;
     });
 
     // Constant-ish-time check: always run bcrypt even on missing user
