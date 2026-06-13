@@ -21,9 +21,9 @@ Use **AI image generation APIs** to produce per-tenant-per-vertical image pools,
 
 ### Ownership model
 
-- **Each tenant owns their own image pools.** Two tenants in the same vertical (e.g., LeadSquad and Boston Co both running painting brands) have two completely separate sets of generated images. No shared inventory.
+- **Each tenant owns their own image pools.** Two tenants in the same vertical (e.g., LeadSquad and Localize both running painting brands) have two completely separate sets of generated images. No shared inventory.
 - **Each tenant pays directly** by attaching their own Flux API account credentials in tenant settings.
-- **Each tenant has their own image approver** — a designated tenant user who reviews generation batches before the images become available for page assignment. LeadSquad's approver is one of their partners; Boston Co's approver is Gerry (he's working with that team).
+- **Each tenant has their own image approver** — a designated tenant user who reviews generation batches before the images become available for page assignment. LeadSquad's approver is one of their partners; Localize's approver is Gerry (he's working with that team).
 - **The platform owns the generation orchestration, scheduling, anti-clustering rules, and approval UI — not the imagery itself.**
 
 ### What the platform does automatically
@@ -37,7 +37,7 @@ Use **AI image generation APIs** to produce per-tenant-per-vertical image pools,
 
 ### What Gerry does (when assigned)
 
-For Boston Co, where Gerry is the assigned approver:
+For Localize, where Gerry is the assigned approver:
 - Reviews 10% sample of each newly-generated batch
 - Flags any AI tells, off-brand imagery, or quality issues
 - Cannot reassign or regenerate himself — approval-only role
@@ -357,7 +357,7 @@ All served via CloudFront. **Never hotlinked from anywhere external.**
 After every generation batch:
 
 1. Job status flips to `awaiting_approval`
-2. Notification fires to the **tenant's designated approver** (LeadSquad: one of their partners; Boston Co: Gerry; default if unset: the tenant Admin)
+2. Notification fires to the **tenant's designated approver** (LeadSquad: one of their partners; Localize: Gerry; default if unset: the tenant Admin)
 3. Approver visits `{tenant-slug}.continueleads.com/images/review/{job-id}` to see a 10% random sample
 4. Per-image actions: Approve all-in-batch | Approve sample-shown | Flag specific images | Reject batch
 5. Approved images flip to `status=active` and become available for page assignment
@@ -405,7 +405,7 @@ Each tenant attaches their own Flux account to the platform. Image generation co
 
 For LeadSquad with painting + HVAC + plumbing + roofing (4 verticals): roughly **$7.20/year** in image costs.
 
-For Boston Co at similar scale: same range.
+For Localize at similar scale: same range.
 
 ### Platform-incurred costs (Continue Leads pays)
 
@@ -491,7 +491,7 @@ Every aspect of imagery is tenant-scoped from day one:
 - **RLS protects every related table** — pools, images, assignments, generation jobs.
 - **No image, no prompt, no generation history is ever visible across tenants.**
 
-This means: even if LeadSquad and Boston Co both run painting brands, their imagery never overlaps. No "Hey, didn't I see this image on someone else's site?" risk.
+This means: even if LeadSquad and Localize both run painting brands, their imagery never overlaps. No "Hey, didn't I see this image on someone else's site?" risk.
 
 ## What this protects against
 
@@ -515,7 +515,7 @@ This means: even if LeadSquad and Boston Co both run painting brands, their imag
 3. **Account ownership:** **Each tenant brings their own Flux account.** The platform never fronts image generation costs.
 4. **Approval workflow:** **Automatic generation with required tenant-level approval before images become usable.** Each tenant designates an approver:
    - **LeadSquad:** one of their partners
-   - **Boston Co:** Gerry
+   - **Localize:** Gerry
    - **Default for new tenants:** first tenant Admin
 5. **People in imagery:** Yes, but **wide shots only** — facial detail isn't important, avoids uncanny face artifacts.
 6. **Same-vertical brands across tenants:** **Never share an image.** Per-tenant pools guarantee this.
