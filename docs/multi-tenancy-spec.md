@@ -10,10 +10,10 @@
 Continue Leads is a platform, not a single business. Multiple companies will use it:
 
 - **LeadSquad** (Tampa partners) — lead-gen operation on its own
-- **Boston Co** (Joe + Isis, name TBD) — separate lead-gen operation
+- **Localize** (Joe + Isis, Boston-based) — separate lead-gen operation
 - Future tenants we add later
 
-Each tenant operates independently. A Sales user at LeadSquad must never see Boston Co's leads. A buyer onboarded by Boston Co must never receive a lead from LeadSquad's brands. Tenant boundaries are a primary security guarantee, not a UI convenience.
+Each tenant operates independently. A Sales user at LeadSquad must never see Localize's leads. A buyer onboarded by Localize must never receive a lead from LeadSquad's brands. Tenant boundaries are a primary security guarantee, not a UI convenience.
 
 This spec defines how that isolation works.
 
@@ -21,7 +21,7 @@ This spec defines how that isolation works.
 
 | Term | Meaning |
 |---|---|
-| **Tenant** | One operating company using Continue Leads (LeadSquad, Boston Co, etc.). Top-level isolation boundary. |
+| **Tenant** | One operating company using Continue Leads (LeadSquad, Localize, etc.). Top-level isolation boundary. |
 | **Brand** | One lead-gen "front" owned by a tenant. Has its own domain, page set, look-and-feel. One tenant has many brands. |
 | **Page** | One HTML page rendered for a brand (money, city, service, legal, blog). One brand has many pages. |
 | **Tenant user** | A human user attached to a single tenant (Joe, Isis, LeadSquad partner). |
@@ -257,7 +257,7 @@ RLS protects data. These rules protect the surface area:
 
 - `app.continueleads.com` — root login / marketing landing
 - `admin.continueleads.com` — platform admin (Thiago) — single-tenant view of all tenants
-- `{tenant-slug}.continueleads.com` — tenant-scoped admin (LeadSquad, Boston Co)
+- `{tenant-slug}.continueleads.com` — tenant-scoped admin (LeadSquad, Localize)
 - `preview.continueleads.com/{tenant-slug}/{brand-id}/` — Phase 2 staging brand sites
 - `{brand-domain}.com` — live brand sites (Phase 2)
 
@@ -543,7 +543,7 @@ These are deliberately deferred:
 These were resolved during the spec review:
 
 1. **First platform user email:** `thiago@continueleads.com` (Google Workspace mailbox).
-2. **First tenant slugs:** `internal` (Continue Leads' own ops), `leadsquad`, `boston-co` (placeholder until Joe + Isis name their company).
+2. **First tenant slugs:** `internal` (Continue Leads' own ops), `leadsquad`, `localize` (Joe + Isis's Boston-based company).
 3. **Tenant lifecycle:** two states only — `ACTIVE` and `DELETED`. `DELETED` blocks all tenant-user logins but **does NOT** stop brand sites from serving, lead capture, or any background processing. Data preserved. Platform admin (Thiago) retains full read+write access to a DELETED tenant and decides per-case what to do with pages/leads/billing/etc. No hard delete in v1 — only manual SQL for compliance/legal requests.
 4. **Cookie domain:** `.continueleads.com` (covers all subdomains).
 5. **Session expiration:** uniform 12 hours for both platform and tenant users in v1. Zero infra cost difference; chosen as the balance between security and login friction. Will likely revisit when 2FA lands (platform sessions can safely extend to 7 days once 2FA covers cookie-theft risk).

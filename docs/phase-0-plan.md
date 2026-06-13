@@ -52,7 +52,7 @@ The total Phase 0 size grew from ~12-18 hours to **~22-30 hours** across 7-9 bur
 | Concern | Today | Phase 0 target |
 |---|---|---|
 | Auth | Single shared HMAC password | Per-user accounts within tenants, 4 roles (admin/ops/sales/dev), audit log |
-| Tenant model | Single-tenant (everything lives in one bucket) | Multi-tenant with RLS isolation; LeadSquad + Boston Co + Internal seeded |
+| Tenant model | Single-tenant (everything lives in one bucket) | Multi-tenant with RLS isolation; LeadSquad + Localize + Internal seeded |
 | Secrets storage | Plaintext in ECS task def | Secrets Manager refs (per-tenant for provider keys, shared for platform) |
 | Cookie | `secure: false`, `SameSite: lax` | `secure: true`, `SameSite: strict`, 12h expiration |
 | Error tracking | None | Sentry free tier (5k events/mo), server + client, per-tenant tagging |
@@ -236,7 +236,7 @@ Per `seo-aeo-strategy.md`-adjacent decisions: Telegram, not WhatsApp; AWS Lambda
 Phase 0 is done when ALL of these are true:
 
 - [ ] No plaintext secrets in any ECS task definition. All sensitive values come from Secrets Manager.
-- [ ] Two tenants exist in the platform: `internal` (seeded), `leadsquad` (provisioned), `boston-co` (provisioned placeholder)
+- [ ] Two tenants exist in the platform: `internal` (seeded), `leadsquad` (provisioned), `localize` (provisioned placeholder)
 - [ ] Logged-out users see the appropriate `/login` for everything except `/api/leads/capture` and the public-facing brand sites
 - [ ] Login requires email + password — no shared secret in code
 - [ ] Roles enforced at the API level — a Sales user cannot DELETE a brand
@@ -280,7 +280,7 @@ These were called out in the spec docs but worth restating here:
 - **Cost alert thresholds** — recommend defaults at $10 Claude / day (warn), $25 Claude / day (critical), per tenant. Platform-level: $50 Claude / day (warn), $100 Claude / day (critical). Tunable from cost dashboard UI.
 - **Sentry tier** — free tier (5k events/mo) sufficient for staging. Bump to paid only on actual usage signal.
 - **First platform user** — `thiago@continueleads.com` per `multi-tenancy-spec.md`
-- **First tenant slugs** — `internal`, `leadsquad`, `boston-co`
+- **First tenant slugs** — `internal`, `leadsquad`, `localize`
 
 ## Risks & mitigations
 
@@ -311,8 +311,8 @@ Deferred to later phases:
 ## Open questions for Thiago
 
 - [ ] Telegram personal account or new dedicated Continue Leads account for the bot? Recommend dedicated (cleaner separation).
-- [ ] Joe / Isis Telegram joining cadence — do you want them in the Boston Co alert channel from day 1, or wait until Phase 5 lead alerts start firing meaningfully?
-- [ ] LeadSquad onboarding — when do you actually provision their tenant? Before or after Boston Co? Affects which tenant is the "first real one" we test the onboarding flow against.
+- [ ] Joe / Isis Telegram joining cadence — do you want them in the Localize alert channel from day 1, or wait until Phase 5 lead alerts start firing meaningfully?
+- [ ] LeadSquad onboarding — when do you actually provision their tenant? Before or after Localize? Affects which tenant is the "first real one" we test the onboarding flow against.
 - [ ] First-tenant dashboard demo — should the seed data for LeadSquad include sample brands so the dashboard looks alive on first login? (My rec: yes, seed 1-2 demo brands in `DRAFT` status.)
 
 ## What to read before starting any burst

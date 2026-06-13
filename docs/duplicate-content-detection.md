@@ -135,11 +135,11 @@ CREATE INDEX idx_similarity_trend_tenant_site_date ON similarity_trend_snapshots
 
 ### Why no cross-tenant comparison
 
-A natural question: should we compare LeadSquad's pages against Boston Co's pages?
+A natural question: should we compare LeadSquad's pages against Localize's pages?
 
 **No.** Three reasons:
 
-1. **Isolation violation.** A core multi-tenancy guarantee is that one tenant cannot affect another. A similarity alert that says "your page is 88% similar to a Boston Co page" leaks information across tenants.
+1. **Isolation violation.** A core multi-tenancy guarantee is that one tenant cannot affect another. A similarity alert that says "your page is 88% similar to a Localize page" leaks information across tenants.
 2. **False positives by design.** Two tenants legitimately running painting lead-gen in similar markets will have meaningful overlap. That's not a Google penalty risk for either tenant — Google judges per-domain quality, and different tenants own different domains.
 3. **Doesn't help.** What action would a tenant take? They can't see the other tenant's content. They can't request changes. The alert is unactionable.
 

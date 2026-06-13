@@ -10,9 +10,9 @@
 **Current tenants (planned):**
 - `internal` — Continue Leads' own ops / R&D
 - `leadsquad` — Tampa partners running their own lead-gen
-- `boston-co` — Joe + Isis's Boston operation (name TBD)
+- `localize` — Joe + Isis's Boston-based operation, Localize
 
-Thiago (you) is a platform owner and also a partner at LeadSquad + Boston Co. The platform is designed so YOU can walk away from any partnership and the platform travels with you.
+Thiago (you) is a platform owner and also a partner at LeadSquad + Localize. The platform is designed so YOU can walk away from any partnership and the platform travels with you.
 
 **Core spec docs** (read before working on the related area):
 - [`docs/multi-tenancy-spec.md`](./docs/multi-tenancy-spec.md) — tenant model, RLS isolation, auth, URLs
@@ -146,7 +146,7 @@ Decisions made during the kickoff session (2026-05-02). Revisit if assumptions c
 | DNS provider | Cloudflare (delegated from name.com registrar). All record changes in Cloudflare. ACM validation + ALB CNAMEs use **proxy off (gray cloud)** | Discovered 2026-05-04 — initially assumed Route 53. Email already on Cloudflare so migrating away would orphan MX. |
 | TLS strategy (admin) | ACM cert + ALB-terminated TLS, direct user → ALB (no Cloudflare proxy). HTTP:80 listener 301-redirects to HTTPS | Phase 1 close. Brand sites in Phase 3 may proxy through Cloudflare for WAF; admin stays direct. |
 | Git identity (commits) | `Thiago DeSouza <thiago@continueleads.com>` | Configured 2026-05-04 globally on this machine. Past commits with `@Thiagos-MacBook-Pro-2.local` left untouched (already merged). |
-| **Platform model** | Multi-tenant SaaS; LeadSquad + Boston Co + future are tenants | 2026-05-XX — fundamental architecture pivot from single-tenant assumptions |
+| **Platform model** | Multi-tenant SaaS; LeadSquad + Localize + future are tenants | 2026-05-XX — fundamental architecture pivot from single-tenant assumptions |
 | **Tenant code term** | `tenant` (not `account`, not `company`) | 2026-05-XX — chosen to avoid collisions with "account" and "company" elsewhere |
 | **Isolation strategy** | Postgres Row-Level Security (RLS) + tenant-scoped DB roles | DB enforces; app code can't accidentally leak cross-tenant data |
 | **URL structure** | `admin.continueleads.com` for platform admin, `{slug}.continueleads.com` per tenant | Wildcard ACM cert needed |
@@ -154,7 +154,7 @@ Decisions made during the kickoff session (2026-05-02). Revisit if assumptions c
 | **Tenant lifecycle** | Two states: ACTIVE, DELETED. DELETED blocks tenant-user login but everything else keeps running; platform admin retains full access | Manual SQL only for hard delete |
 | **Image generation** | Flux schnell via API; each tenant brings their own API key | DALL-E 3 considered for future quality upgrade |
 | **Image pool ownership** | Per-tenant per-vertical (v1); per-brand (v2 when brand is spun up) | No cross-tenant image sharing — every tenant pays for and owns their own imagery |
-| **Image approver** | Per-tenant assigned user: LeadSquad = one of their partners, Boston Co = Gerry, default = tenant Admin | Sample review of 10% per batch |
+| **Image approver** | Per-tenant assigned user: LeadSquad = one of their partners, Localize = Gerry, default = tenant Admin | Sample review of 10% per batch |
 | **Five-star display** | Decorative stars with framing like "Quality Service Guaranteed" — no rating-count claim | FTC-defensible posture; deferred reviews collection to v2 |
 | **TCPA consent UX** | "By clicking" implied consent (no checkbox) above submit button | Stronger legal posture than checkbox |
 | **Duplicate detection** | Voyage `voyage-3-lite` embeddings + pgvector; 0.85 block / 0.75 warn thresholds | Per-tenant tunable; cross-tenant comparison explicitly OFF |
@@ -206,13 +206,13 @@ See `docs/image-strategy.md` for the full spec. Quick summary:
 
 ### Platform level (Continue Leads)
 
-- **Thiago** — founder, platform owner, technical lead. Working with you (Claude Code). Platform User (super-admin across all tenants). Also partner at LeadSquad + Boston Co.
+- **Thiago** — founder, platform owner, technical lead. Working with you (Claude Code). Platform User (super-admin across all tenants). Also partner at LeadSquad + Localize.
 
 ### Tenants and tenant users
 
 - **`internal` tenant** — Continue Leads' own ops. Thiago is the only user.
 - **`leadsquad` tenant** — Tampa partners (names TBD). The LeadSquad partners run lead-gen via the platform; one of them is the assigned image approver for that tenant.
-- **`boston-co` tenant** (name TBD until Joe + Isis decide):
+- **`localize` tenant** (Localize, Joe + Isis's Boston-based company):
   - **Joe** — sales/BD. Role: Sales (read-only leads + revenue dashboard).
   - **Isis** — ops director candidate. Role: Ops (QA review, lead management, brand status).
   - **Gerry** — image approver only (designer in Philippines, also delivers brand logos + Figma page designs for tenants that contract him).

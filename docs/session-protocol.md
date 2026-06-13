@@ -199,7 +199,7 @@ After Phase 0 Burst 0b (multi-tenancy) ships, there are two login URLs:
 
 - `https://admin.continueleads.com/login` — YOUR platform admin login (sees across all tenants)
 - `https://leadsquad.continueleads.com/login` — LeadSquad users' login
-- `https://boston-co.continueleads.com/login` — Boston Co users' login
+- `https://localize.continueleads.com/login` — Localize users' login
 
 Each has a separate session and separate password.
 
