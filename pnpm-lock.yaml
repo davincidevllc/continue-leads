@@ -17,6 +17,9 @@ importers:
 
   apps/admin:
     dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.62.0
+        version: 0.62.0
       '@continue-leads/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -164,6 +167,10 @@ importers:
         version: 3.2.4(@types/node@25.2.3)(terser@5.48.0)
 
 packages:
+
+  '@anthropic-ai/sdk@0.62.0':
+    resolution: {integrity: sha512-gT2VFKX0gSp7KJNlav/vzRFjJOPYDZxCJRx7MYUc+fqURc5aS6OI/UJeD2KytJkjsIWv0OOwH1ePc1S5QE2GZw==}
+    hasBin: true
 
   '@babel/code-frame@7.29.7':
     resolution: {integrity: sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw==}
@@ -2494,6 +2501,8 @@ packages:
     engines: {node: '>=10'}
 
 snapshots:
+
+  '@anthropic-ai/sdk@0.62.0': {}
 
   '@babel/code-frame@7.29.7':
     dependencies:

@@ -19,6 +19,7 @@
     "pg": "^8.13.0",
     "@sentry/nextjs": "^8.45.0",
     "bcryptjs": "^2.4.3",
+    "@anthropic-ai/sdk": "^0.62.0",
     "@continue-leads/shared": "workspace:*",
     "@continue-leads/db": "workspace:*"
   },
