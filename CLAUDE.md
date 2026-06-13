@@ -271,31 +271,85 @@ See `docs/image-strategy.md` for the full spec. Quick summary:
 
 ## Last Session
 
-**Session: 2026-06-12 — Burst 0a (Secrets migration) complete**
+**Session: 2026-06-13 — Burst 0b.1 (SQL) + Burst 0b.2 (auth code) written. Three PRs queued for in-person apply session.**
 
 What was completed:
 
-- **All three plaintext secrets migrated to AWS Secrets Manager:** `ADMIN_AUTH_SECRET`, `DB_PASSWORD`, `PII_ENCRYPTION_KEY` now live as JSON keys under `cl-stg-app-secrets`. ECS task def revision **53** (was on 52 — CLAUDE.md said 51, slight drift) references them via `secrets:` block; the three values are removed from `environment:`.
-- **All three values rotated during migration.** Old values (`ContinueLeads2026Staging` for ADMIN_AUTH_SECRET, `BasilioDeSouza12!` for DB_PASSWORD, unknown for PII_ENCRYPTION_KEY since not yet used) treated as compromised. New values generated via `openssl rand`, stored in iCloud Keychain under `CL — Staging *` entries per session-protocol.md.
-- **RDS master password updated** to match the new `DB_PASSWORD` value. Self-managed (not RDS-managed credentials — confirmed via the absence of "Managed in Secrets Manager" label on the RDS instance page).
-- **IAM execution role** `cl-stg-admin-exec-role` already had a customer-inline policy `secrets-access` granting `secretsmanager:GetSecretValue` on `arn:aws:secretsmanager:us-east-1:768499314735:secret:cl-stg-app-secrets-pUvqDq` — no policy edit needed.
-- **Force-deployed ECS service** to revision 53. New task came up healthy in ~2 minutes. Old task drained. Login verified at `https://admin.continueleads.com` with new `ADMIN_AUTH_SECRET`. Dashboard rendered DB-backed data (Sites: 4, Active Metros: 5) proving the new `DB_PASSWORD` reaches the app and RDS accepts it.
-- **Known Issues entry "CRITICAL: All secrets are plaintext" removed** from this file. Replaced with smaller cleanup item about `cl-stg-db-credentials` being incomplete (no password key) — low priority.
-- **Decisions Log entry added** documenting the staging secrets layout.
+### Tooling & cleanup
+- **`gh` CLI installed** locally via official `.pkg` (v2.94.0, Apple Silicon Mac), `gh auth login` complete, token in macOS Keychain. All PRs in this session opened via `gh pr create`.
+- **Stale remote branches deleted** — only `origin/main` plus the three new active feature branches remain.
+- **PR #6 merged** — `docs: rename boston-co → localize`. All 6 docs (CLAUDE.md + 5 spec files) updated.
 
-Architectural decisions confirmed (no new ones — execution of existing plan):
+### Burst 0b.1 — SQL written (PR #7, open)
 
-- Per-secret JSON key reference syntax (`arn:...:cl-stg-app-secrets-XXX:KEY::`) works cleanly; ECS task def stays readable.
-- Brief deploy-window outage (~1-3 min between RDS password change and new task being healthy) is acceptable for staging. For prod-tier rollouts we'd want a slower rolling deploy with RDS-managed credentials.
+Branch `feat/burst-0b1-multi-tenancy`. Three migrations in `packages/db/migrations/`:
+
+- `0003_multi_tenancy.sql` — MT-1 schema (306 lines): 6 new tables (`tenants`, `platform_users`, `tenant_users`, `sessions`, `tenant_audit_log`, `platform_audit_log`) + nullable `tenant_id` column added to ~26 existing tenant-scoped tables across both migration systems (canonical + legacy).
+- `0004_multi_tenancy_rls.sql` — MT-2 RLS: creates `app_tenant_user` (RLS-subject) and `app_platform_user` (BYPASSRLS) DB roles + privileges; enables RLS on 29 tables; writes per-table policies filtering by `current_setting('app.current_tenant_id', true)::uuid`.
+- `0005_multi_tenancy_backfill.sql` — MT-3a backfill: deletes the E2E test brand, seeds the `internal` tenant with fixed UUID `00000000-0000-0000-0000-000000000001`, backfills `tenant_id` on every remaining row. Sanity DO block raises on unexpected state.
+
+### Burst 0b.2 code written (PR #8 + PR #9, open)
+
+- **PR #8** — Branch `feat/burst-0b2-mt4-db-context`. MT-4 db-context wrapper at `apps/admin/src/lib/db-context.ts` (177 lines). Exports `withTenantContext`, `withPlatformContext`, `resolveTenantBySlug`. Uses `SET LOCAL ROLE` + parameterized `set_config('app.current_tenant_id', $1, true)` for safe RLS scoping. UUID validation at the boundary.
+- **PR #9** — Branch `feat/burst-0b2-auth`. MT-5 (middleware), MT-6 (platform auth), MT-7 (tenant auth) — 9 files, +705/-18:
+  - `apps/admin/src/middleware.ts` rewritten: parses host, sets `x-cl-subdomain-type` / `x-cl-subdomain-slug` headers, handles apex/unknown/admin/tenant cases. Preserves legacy HMAC cookie path for backwards compat.
+  - `apps/admin/src/lib/session.ts` (new) — DB-backed session create/load/delete, cookie config (12h, HttpOnly, Secure in prod, SameSite=Strict, scoped to `.continueleads.com`). Random 32-byte tokens; SHA-256 hash stored in DB.
+  - `app/api/platform-auth/login/route.ts` + `logout/route.ts` — bcrypt verify against `platform_users`, session creation, anti-enumeration constant-time check.
+  - `app/api/tenant-auth/login/route.ts` + `logout/route.ts` — same shape, resolves slug → tenant → user, queries `tenant_users`.
+  - `packages/db/src/seed-platform-user.ts` — CLI script to create/rotate Thiago's first platform user, wired as `pnpm --filter @continue-leads/db seed:platform-user <email> <password> [name]`.
+  - `bcryptjs` added to both `apps/admin` and `packages/db` package.json. Pure JS, no native compile.
+
+### CLAUDE.md updates (this PR)
+
+- Architectural decisions added: canonical migration system, internal tenant seed UUID.
+- New Known Issue: dual migration systems (`packages/db/migrations/` + `/migrations/`) — both live on staging; new work goes in canonical, legacy directory marked for future consolidation.
+- This Last Session block.
+
+Architectural decisions surfaced this session:
+
+- **Canonical migration system** = `packages/db/migrations/` (added to Decisions Log).
+- **Internal tenant seed UUID** = `00000000-0000-0000-0000-000000000001` (Decisions Log).
+- **MT-3 split into MT-3a (data backfill, ships now) + MT-3b (NOT NULL flip, deferred).** NOT NULL cannot land until MT-8 refactors API routes to provide `tenant_id` on every INSERT. MT-3b is task #19.
+- **bcryptjs over native bcrypt** — pure JS, no native compile issues on ECS Fargate.
+- **Random opaque session tokens, not JWT** — database is the source of truth; deletion = instant revocation.
+- **Session cookie scoped to `.continueleads.com`** — one cookie persists across admin + tenant subdomains; the SESSION ROW maps to a specific user/tenant.
+- **Legacy HMAC auth preserved in middleware** until MT-8 refactors existing routes en masse. PR #9 is additive; nothing was deleted.
 
 What's in progress:
 
-- Nothing. Working tree clean on `main` (with this closeout PR pending merge).
+- **3 PRs open, all conceptually finished but awaiting in-person apply + verify:**
+  - **PR #7** — `feat/burst-0b1-multi-tenancy` — SQL migrations
+  - **PR #8** — `feat/burst-0b2-mt4-db-context` — TypeScript wrapper
+  - **PR #9** — `feat/burst-0b2-auth` — middleware + 4 auth routes + seed script
+- **This CLAUDE.md closeout PR (#10 when opened)** — branch `docs/burst-0b1-0b2-session-closeout`.
 
-Next task (when Thiago resumes):
+### Apply order (next session, in-person)
 
-- **Burst 0b.1 — Multi-tenancy schema + isolation** (~3 hours). MT-1 (schema migration), MT-2 (DB roles + RLS), MT-3 (backfill + NOT NULL). Spec: `docs/multi-tenancy-spec.md`. Plan: `docs/phase-0-plan.md`.
-- Open the session with `docs/session-protocol.md` 60-second opener.
+Strictly in this order:
+
+1. **Pull main and check out PR #7's branch** for the apply: `git fetch && git checkout feat/burst-0b1-multi-tenancy`.
+2. **Apply 0003/0004/0005 to staging RDS.** Three paths in order of preference:
+   - From Mac (if RDS port 5432 reachable): `pnpm install && pnpm --filter @continue-leads/db build && DB_HOST=… DB_PASSWORD=$(aws secretsmanager…) pnpm db:migrate:staging`
+   - From AWS CloudShell: clone repo, fetch password from `cl-stg-app-secrets`, `psql -f` each file in order
+   - Fallback: ECS Exec into the running task and run the migration from there
+3. **Verify the apply.** In psql: `\d+ sites` shows `tenant_id` column + RLS policy; `SELECT slug FROM tenants;` returns `internal`; `SELECT version FROM schema_migrations ORDER BY applied_at DESC LIMIT 3;` shows the three new versions; `SELECT COUNT(*) FROM sites WHERE id = '68adfd7a-…'` returns 0 (test brand deleted).
+4. **Confirm existing app still works.** Hit `https://admin.continueleads.com/login` with the current cookie — should work unchanged because the legacy HMAC path is preserved.
+5. **Merge PR #7.**
+6. **Merge PR #8** (MT-4 db-context wrapper).
+7. **Merge PR #9** (Burst 0b.2 middleware + auth routes). Need to `pnpm install` to pick up bcryptjs before deploying.
+8. **Seed Thiago's platform user:** `pnpm --filter @continue-leads/db seed:platform-user thiago@continueleads.com '<strong password>' 'Thiago DeSouza'`. Store password in iCloud Keychain under `CL — Platform Login` per `session-protocol.md`.
+9. **Deploy.** Push to main triggers CI → ECS deploy. New `cl_session` cookie + `bcryptjs` + new routes go live.
+10. **Smoke test new platform login:** POST to `/api/platform-auth/login` from the browser or curl with Thiago's email + password. Should return `{ok: true, user: {...}}` and set `cl_session` cookie. Verify with `SELECT * FROM sessions WHERE user_type = 'platform' ORDER BY created_at DESC LIMIT 1;`.
+11. **Merge this closeout PR (#10).**
+
+Then start Burst 0b.3 (MT-8 API route refactor, MT-9 tenant management UI, MT-10 tenant user invitation flow).
+
+### What's NOT applied yet
+
+- Wildcard ACM cert `*.continueleads.com` (needed before tenant subdomains actually resolve) — defer to before Burst 0b.3 demo.
+- `tenant_id` `NOT NULL` flip — task #19, after MT-8.
+- Legacy HMAC auth removal — also after MT-8.
+- Dual-migration system consolidation — Known Issue for later.
 
 Open questions / blockers (carried over):
 
