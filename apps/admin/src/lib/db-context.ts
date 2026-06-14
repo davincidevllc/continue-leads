@@ -41,10 +41,13 @@
  *   - Callback throws → ROLLBACK is guaranteed before the error propagates
  */
 
-import type { Pool, PoolClient } from 'pg';
 import pool from './pool';
 
-const typedPool = pool as Pool;
+// `pool` is typed `any` in src/lib/pool.ts to work around `@types/pg` ESM
+// resolution under moduleResolution: bundler. We mirror that here and use a
+// local `PoolClient` alias for callback typing — at runtime it's a real
+// pg PoolClient with `.query()` and `.release()`.
+type PoolClient = any;
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -78,7 +81,7 @@ export async function withTenantContext<T>(
     );
   }
 
-  const client = await typedPool.connect();
+  const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query('SET LOCAL ROLE app_tenant_user');
@@ -126,7 +129,7 @@ export async function withTenantContext<T>(
 export async function withPlatformContext<T>(
   fn: (client: PoolClient) => Promise<T>
 ): Promise<T> {
-  const client = await typedPool.connect();
+  const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query('SET LOCAL ROLE app_platform_user');
@@ -160,11 +163,7 @@ export async function resolveTenantBySlug(
   slug: string
 ): Promise<{ id: string; display_name: string; status: string } | null> {
   return withPlatformContext(async (client) => {
-    const result = await client.query<{
-      id: string;
-      display_name: string;
-      status: string;
-    }>(
+    const result = await client.query(
       `SELECT id, display_name, status
          FROM tenants
         WHERE slug = $1
@@ -172,6 +171,9 @@ export async function resolveTenantBySlug(
         LIMIT 1`,
       [slug]
     );
-    return result.rows[0] ?? null;
+    const row = result.rows[0] as
+      | { id: string; display_name: string; status: string }
+      | undefined;
+    return row ?? null;
   });
 }
