@@ -20,6 +20,7 @@ export async function register() {
   }
 }
 
-// Re-export Sentry's request-error hook so unhandled errors in route
-// handlers get captured automatically.
-export { onRequestError } from '@sentry/nextjs';
+// Wire Next.js's `onRequestError` instrumentation hook to Sentry. Next.js
+// looks for an export named `onRequestError`; the Sentry function that
+// implements it is `captureRequestError`.
+export { captureRequestError as onRequestError } from '@sentry/nextjs';
