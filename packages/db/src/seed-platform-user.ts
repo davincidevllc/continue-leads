@@ -65,6 +65,12 @@ async function main() {
     );
 
     const row = result.rows[0];
+    if (!row) {
+      // INSERT ... ON CONFLICT ... RETURNING always produces a row; this
+      // branch exists to satisfy TS noUncheckedIndexedAccess.
+      console.error('❌ Upsert returned no row — unexpected.');
+      process.exit(1);
+    }
     console.log(`✅ ${row.action.toUpperCase()}: platform_user ${row.email} (id=${row.id})`);
     console.log('');
     console.log('You can now log in at https://admin.continueleads.com/login');
