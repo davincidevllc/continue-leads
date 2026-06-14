@@ -165,6 +165,8 @@ Decisions made during the kickoff session (2026-05-02). Revisit if assumptions c
 | **Embedding storage** | pgvector inside existing RDS — no separate vector DB | Zero infra cost |
 | **Approval workflow** | Auto-generation + required tenant-level approval before images go usable | Per-tenant approver |
 | **Secrets storage (staging)** | `cl-stg-app-secrets` JSON with keys `ADMIN_AUTH_SECRET`, `DB_PASSWORD`, `PII_ENCRYPTION_KEY`. ECS task def `cl-stg-admin:53+` references via `secrets:` block. Execution role `cl-stg-admin-exec-role` has `secrets-access` inline policy granting `secretsmanager:GetSecretValue` on the secret. | Burst 0a complete 2026-06-12. All three values rotated during migration; old values treated as compromised. New values backed up in iCloud Keychain under `CL — Staging *` entries. |
+| **Canonical migration system** | `packages/db/migrations/*.sql` (with `schema_migrations` tracking, wired to `pnpm db:migrate:*`). Use this for ALL new migrations going forward. | 2026-06-13. The legacy `/migrations/` raw SQL system also has tables live on staging; consolidation tracked as a Known Issue. |
+| **Internal tenant seed UUID** | `00000000-0000-0000-0000-000000000001` (fixed for reproducibility across environments and tests). | 2026-06-13 — seeded in `0005_multi_tenancy_backfill.sql`. |
 
 ## Open Business Questions (unresolved)
 
@@ -258,6 +260,10 @@ See `docs/image-strategy.md` for the full spec. Quick summary:
 
 ## Known Issues / Tracked Cleanup
 
+- **Dual migration systems** (discovered 2026-06-13). Two parallel SQL migration paths exist in the repo:
+  1. **Canonical:** `packages/db/migrations/` with `schema_migrations` version tracking, wired to `pnpm db:migrate:*` scripts (modern, properly idempotent). Files: `0001_init.sql`, `0002_seed_launch_data.sql`, and Burst 0b.1's `0003_multi_tenancy.sql`, `0004_multi_tenancy_rls.sql`, `0005_multi_tenancy_backfill.sql`.
+  2. **Legacy:** `/migrations/` raw SQL files invoked by standalone `run-migration.js` (no version tracking). Files: `001-taxonomy-overhaul.sql` through `004-pages-jobs-qa.sql`.
+  Both have been applied to staging. The app uses tables from both — `metros`, `sites`, `leads`, etc. from canonical; `site_pages`, `site_target_*`, `generation_jobs`, `qa_runs`, `blog_posts` from legacy. **Going forward: all new migrations land in `packages/db/migrations/`.** The legacy directory should be consolidated (rewritten as canonical migrations) in a future cleanup pass. Multi-tenancy migrations are designed to work with both systems live (legacy tables guarded by `EXISTS` checks).
 - **`cl-stg-db-credentials` Secrets Manager entry is incomplete** — it has `host`, `port`, `dbname`, `username` but no `password`. The app reads `DB_PASSWORD` from `cl-stg-app-secrets` instead. Either (a) sync the current password into this secret so it's a complete connection record, or (b) delete this orphan secret entirely. Future improvement: refactor the app to read all four DB connection values from one secret instead of mixing env + secret. Low priority.
 - **Session cookie still `secure: false`** in `apps/admin/src/lib/auth.ts:39`. Legacy from HTTP-era staging. Now that HTTPS is enforced (Phase 1 closed 2026-05-04), flip to `secure: true` so the cookie won't transmit over plain HTTP. Small one-file PR. Will be folded into Phase 0 RBAC-2 if not done sooner.
 - **Session cookie `SameSite=lax`** — Phase 0 RBAC-2 should bump to `SameSite=strict` for the admin app (no cross-site embeds expected).
@@ -267,35 +273,45 @@ See `docs/image-strategy.md` for the full spec. Quick summary:
 - **Empty/malformed POSTs return HTTP 500** on `/api/auth/login` and `/api/leads/capture` — should return 400. Pre-existing, unrelated to recent changes. Hardening task.
 - **No `DELETE /api/brands/[id]` endpoint** — `DELETE /api/brands/[id]/pages` exists, but no way to delete a brand record itself via HTTP. Test brand `cl-e2e-painting-ma-20260503.com` (id `68adfd7a-42b4-48e8-9be0-b338cdcbbaa9`) is sitting in staging as a test artifact. Add endpoint when convenient.
 - **Dead validation CNAME at name.com** — during Phase 1 DNS work, an ACM validation CNAME was added at name.com before discovering DNS is at Cloudflare. The record at name.com is inert (nameservers point to Cloudflare). Delete on next visit to name.com DNS panel.
-- **`gh` CLI not installed locally** — every PR creation requires the user to open the compare URL in a browser. ~30s per PR, but adds friction. Install via manual download (no `brew` on this machine) when there's spare time, then `gh auth login`. Token stored in macOS Keychain.
+- ~~**`gh` CLI not installed locally**~~ → installed 2026-06-13 via official `.pkg` (v2.94.0), authenticated via `gh auth login` with token in macOS Keychain. PRs now open via `gh pr create`.
 
 ## Last Session
 
-**Session: 2026-06-12 — Burst 0a (Secrets migration) complete**
+**Session: 2026-06-13 — Burst 0b.1 written end-to-end (SQL only; apply deferred)**
 
 What was completed:
 
-- **All three plaintext secrets migrated to AWS Secrets Manager:** `ADMIN_AUTH_SECRET`, `DB_PASSWORD`, `PII_ENCRYPTION_KEY` now live as JSON keys under `cl-stg-app-secrets`. ECS task def revision **53** (was on 52 — CLAUDE.md said 51, slight drift) references them via `secrets:` block; the three values are removed from `environment:`.
-- **All three values rotated during migration.** Old values (`ContinueLeads2026Staging` for ADMIN_AUTH_SECRET, `BasilioDeSouza12!` for DB_PASSWORD, unknown for PII_ENCRYPTION_KEY since not yet used) treated as compromised. New values generated via `openssl rand`, stored in iCloud Keychain under `CL — Staging *` entries per session-protocol.md.
-- **RDS master password updated** to match the new `DB_PASSWORD` value. Self-managed (not RDS-managed credentials — confirmed via the absence of "Managed in Secrets Manager" label on the RDS instance page).
-- **IAM execution role** `cl-stg-admin-exec-role` already had a customer-inline policy `secrets-access` granting `secretsmanager:GetSecretValue` on `arn:aws:secretsmanager:us-east-1:768499314735:secret:cl-stg-app-secrets-pUvqDq` — no policy edit needed.
-- **Force-deployed ECS service** to revision 53. New task came up healthy in ~2 minutes. Old task drained. Login verified at `https://admin.continueleads.com` with new `ADMIN_AUTH_SECRET`. Dashboard rendered DB-backed data (Sites: 4, Active Metros: 5) proving the new `DB_PASSWORD` reaches the app and RDS accepts it.
-- **Known Issues entry "CRITICAL: All secrets are plaintext" removed** from this file. Replaced with smaller cleanup item about `cl-stg-db-credentials` being incomplete (no password key) — low priority.
-- **Decisions Log entry added** documenting the staging secrets layout.
+- **`gh` CLI installed** locally via official `.pkg` (v2.94.0, Apple Silicon Mac), `gh auth login` complete, token in macOS Keychain. All PRs in this session opened via `gh pr create` — no more browser compare-URL dance.
+- **Stale remote branches cleaned up** — only `origin/main` and the active feature branch remain. Most older branches had been auto-deleted on PR merge; `--prune` swept up local stale refs and `docs/platform-architecture-specs` got a final manual delete.
+- **PR #6 merged** — `docs: rename boston-co → localize`. Joe + Isis's company is named Localize. All 6 docs (CLAUDE.md + 5 spec files) updated: slug `boston-co` → `localize`, display name `Boston Co` → `Localize`, "(name TBD)" parentheticals updated.
+- **Burst 0b.1 SQL written and pushed (PR #7, branch `feat/burst-0b1-multi-tenancy`):**
+  - `packages/db/migrations/0003_multi_tenancy.sql` — MT-1 schema. 6 new tables (tenants, platform_users, tenant_users, sessions, tenant_audit_log, platform_audit_log) + nullable `tenant_id` column added to ~26 existing tenant-scoped tables across both migration systems. ~306 lines.
+  - `packages/db/migrations/0004_multi_tenancy_rls.sql` — MT-2 RLS. Creates `app_tenant_user` (RLS-subject) and `app_platform_user` (BYPASSRLS) DB roles + privileges + ALTER DEFAULT PRIVILEGES; enables RLS on 29 tables; writes per-table policies filtering by `current_setting('app.current_tenant_id', true)::uuid`. Sessions, platform_users, platform_audit_log deliberately exempt (reasoning in SQL comments).
+  - `packages/db/migrations/0005_multi_tenancy_backfill.sql` — MT-3a. Deletes the E2E test brand (`cl-e2e-painting-ma-20260503.com`), seeds the `internal` tenant with fixed UUID `00000000-0000-0000-0000-000000000001`, backfills `tenant_id` on every remaining row in 26 tables. Sanity-check DO block raises on unexpected state.
+- **Architectural decision documented:** all new migrations land in `packages/db/migrations/` (the canonical system). The legacy `/migrations/` directory is now tracked as a Known Issue for future consolidation.
+- **MT-3 split into MT-3a (this PR) + MT-3b (deferred):** the `NOT NULL` flip on `tenant_id` columns cannot ship until the API routes are refactored (Burst 0b.3 → MT-8) to provide `tenant_id` on every INSERT. MT-3b will land as `0006_multi_tenancy_not_null.sql` later.
 
-Architectural decisions confirmed (no new ones — execution of existing plan):
+Architectural decisions surfaced this session:
 
-- Per-secret JSON key reference syntax (`arn:...:cl-stg-app-secrets-XXX:KEY::`) works cleanly; ECS task def stays readable.
-- Brief deploy-window outage (~1-3 min between RDS password change and new task being healthy) is acceptable for staging. For prod-tier rollouts we'd want a slower rolling deploy with RDS-managed credentials.
+- **Canonical migration system** = `packages/db/migrations/` (added to Decisions Log).
+- **Internal tenant seed UUID** = `00000000-0000-0000-0000-000000000001` (added to Decisions Log; fixed for reproducibility).
+- **Dual-migration handling:** every new migration that touches existing legacy tables uses `EXISTS` guards so it works whether or not the legacy schema is present on a given DB (future-proofs against fresh-DB scenarios).
+- **MT-1/2/3 are safe to apply BEFORE the app code is refactored** because the running app connects as `cladmin` (RDS master, superuser, BYPASSes RLS by default). Enabling RLS in MT-2 has zero effect on current queries until MT-4 switches the app to the new roles.
 
 What's in progress:
 
-- Nothing. Working tree clean on `main` (with this closeout PR pending merge).
+- **PR #7 open with all 3 migration files committed** (`feat/burst-0b1-multi-tenancy` branch, two commits: MT-1 + MT-2/3a). Title: "feat(db): Burst 0b.1 — multi-tenancy schema + RLS + backfill (MT-1, MT-2, MT-3a)". Tests pass conceptually; awaits real apply against staging RDS.
+- **CLAUDE.md updated** on the same branch with new Decisions Log entries (canonical migration system + internal tenant UUID), new Known Issue (dual migration systems), and this Last Session block.
 
-Next task (when Thiago resumes):
+Next task (when Thiago is back at his computer):
 
-- **Burst 0b.1 — Multi-tenancy schema + isolation** (~3 hours). MT-1 (schema migration), MT-2 (DB roles + RLS), MT-3 (backfill + NOT NULL). Spec: `docs/multi-tenancy-spec.md`. Plan: `docs/phase-0-plan.md`.
-- Open the session with `docs/session-protocol.md` 60-second opener.
+- **Apply the three migrations to staging RDS.** Two viable paths:
+  1. From his Mac: `pnpm install`, `pnpm --filter @continue-leads/db build`, then `DB_HOST=…  DB_PASSWORD=$(aws secretsmanager …) pnpm db:migrate:staging`. Requires AWS CLI + RDS port 5432 reachable from his IP — unconfirmed whether either is true.
+  2. From AWS CloudShell: `git clone`, fetch password from Secrets Manager, `psql -f packages/db/migrations/0003_…sql` (and 0004, 0005). Requires CloudShell to reach RDS in private subnet — unconfirmed.
+  3. Fallback: ECS Exec into the running task. Always works since the task already has DB connectivity.
+- After apply: verify with `\d+ sites` shows `tenant_id` column + `sites_tenant_isolation` policy; `SELECT slug FROM tenants;` returns `internal`; `SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 3;` returns the three new versions.
+- Then merge PR #7 to main.
+- **Then start Burst 0b.2 — auth + routing** (MT-4 db-context wrapper, MT-5 subdomain routing middleware, MT-6 platform auth, MT-7 tenant auth). ~4 hours.
 
 Open questions / blockers (carried over):
 
@@ -304,6 +320,7 @@ Open questions / blockers (carried over):
 - LeadSquad provisioning order (Burst 0b.3).
 - First-tenant demo seed data — sample brands in DRAFT for the dashboard (Burst 0c)?
 - TCPA copy still placeholder, blocked on attorney review (Phase 2).
+- Wildcard ACM cert `*.continueleads.com` needed before MT-5 (deferred to Burst 0b.2 prep).
 
 ---
 
