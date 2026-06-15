@@ -21,11 +21,27 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { withPlatformContext } from '@/lib/db-context';
 import { createSession, sessionCookieOptions } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
+
+const LEGACY_COOKIE_NAME = 'cl_admin_session';
+const LEGACY_COOKIE_MAX_AGE_S = 7 * 24 * 60 * 60;
+
+/**
+ * Mint the legacy HMAC session cookie format ("<ts>.<hex-sha256>") expected by
+ * the edge middleware. Set in parallel with the new cl_session cookie so the
+ * existing admin routes (which still read cl_admin_session via the legacy
+ * `auth.ts` lib) remain navigable after a platform-auth login. To be removed
+ * once MT-8 ships and the middleware drops the legacy check.
+ */
+function makeLegacyHmacToken(timestamp: number, secret: string): string {
+  const hmac = crypto.createHmac('sha256', secret).update(String(timestamp)).digest('hex');
+  return `${timestamp}.${hmac}`;
+}
 
 export async function POST(request: NextRequest) {
   // Defence in depth: middleware should already prevent non-admin
@@ -111,6 +127,22 @@ export async function POST(request: NextRequest) {
       ...sessionCookieOptions(expiresAt),
       value: rawToken,
     });
+
+    // Also issue the legacy HMAC cookie that the edge middleware checks.
+    // Without this, the user logs in successfully but middleware redirects
+    // them straight back to /login because cl_admin_session is missing.
+    // Removed when MT-8 refactors middleware off the legacy cookie.
+    const legacySecret = process.env.ADMIN_AUTH_SECRET;
+    if (legacySecret) {
+      response.cookies.set(LEGACY_COOKIE_NAME, makeLegacyHmacToken(Date.now(), legacySecret), {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: LEGACY_COOKIE_MAX_AGE_S,
+        path: '/',
+      });
+    }
+
     return response;
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
