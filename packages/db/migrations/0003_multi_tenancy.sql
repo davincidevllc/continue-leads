@@ -98,8 +98,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
+-- Full (not partial) index on expires_at. Originally a partial index
+-- WHERE expires_at > now(), but Postgres rejects now() in index predicates
+-- (not IMMUTABLE).
 CREATE INDEX IF NOT EXISTS idx_sessions_expires
-    ON sessions(expires_at) WHERE expires_at > now();
+    ON sessions(expires_at);
 
 -- tenant_audit_log: tenant-scoped action history.
 -- platform_user_id is non-null when a platform user acts on behalf of a tenant
