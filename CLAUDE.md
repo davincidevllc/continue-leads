@@ -1,7 +1,7 @@
 # Continue Leads — Claude Code Context
 
 > **Read this file in full before doing anything else.**
-> Last updated: 2026-06-12
+> Last updated: 2026-06-15
 
 ## Project
 
@@ -277,41 +277,218 @@ See `docs/image-strategy.md` for the full spec. Quick summary:
 
 ## Last Session
 
-**Session: 2026-06-13 — Burst 0b.1 written end-to-end (SQL only; apply deferred)**
+**Session: 2026-06-15 — In-person apply day. All 8 PRs from the 2026-06-13 mobile-dispatch backlog landed. Platform login is LIVE on staging.**
+
+What was accomplished today (the apply playbook from the 2026-06-13 session, executed):
+
+### Auxiliary services set up (Phase A)
+
+- **Sentry signup** — org `davinci-dev`, project `cl-staging-admin`, free tier (5k events/mo). Linked to `davincidevllc/continue-leads` repo for stack-trace source context. DSN: `https://6ec8456...@o4511563900518400.ingest.us.sentry.io/4511563913560064`.
+- **BotFather** — created `@cl_staging_alerts_bot` (display: "Continue Leads Staging Alerts"). Bot token + chat ID `775937110` (Thiago's personal Telegram) added to `cl-stg-app-secrets`. Verified live with `sendMessage` curl.
+- **5 new keys in `cl-stg-app-secrets`**: `SENTRY_DSN`, `NEXT_PUBLIC_SENTRY_DSN`, `SENTRY_ENVIRONMENT=staging`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_PLATFORM_CHAT_ID`. Edited via Console plaintext editor — see Known Issue below about the malformed-JSON near-miss.
+
+### CI fixes + 7 PR merges (Phase B)
+
+The 8 PRs from the 2026-06-13 mobile-dispatch session had three classes of CI failure (none caught during mobile dispatch because no Node toolchain):
+
+| Class | Affected PRs | Cause | Fix |
+|---|---|---|---|
+| Lockfile mismatch | #11, #12, #9 | `package.json` got new deps via Edit, but `pnpm-lock.yaml` wasn't regenerated | `pnpm install` locally on each branch |
+| Cross-branch type dep | #13, #12 | `telegram.ts` and `api-usage.ts` import `./db-context` which only existed on PR #8's branch | Merge PR #8 first → rebase others onto new main |
+| Real TS errors | #8, #9, #13 | `apps/admin` missing `@types/pg`; `client.query<T>` doesn't typecheck when client is `any`; missing comma fix flagged by strict null checks in `seed-platform-user.ts` | Repo-wide changes — see PR #8 |
+
+Final merge order, dependency-respecting:
+
+1. **PR #8** (db-context — unblocks everything that imports it)
+2. **PR #11 + PR #14** (Sentry + pgvector — independent of #8)
+3. **PR #9 + PR #12 + PR #13** (rebased onto new main after #8 lands)
+4. **PR #7** (multi-tenancy SQL — applied separately, see Phase D)
+
+Bonus repo cleanup: added `*.tsbuildinfo` to `.gitignore` (TypeScript incremental build cache was getting committed by accident on PRs #9, #12 amend cycles).
+
+### Migrations applied to staging RDS (Phases C + D)
+
+**Network path** — staging RDS is in fully private subnets (no NAT, no IGW). After multiple pivots, the working path was:
+
+1. Add SSM messaging permissions to `cl-stg-admin-task-role` (4 actions: `CreateControlChannel`, `CreateDataChannel`, `OpenControlChannel`, `OpenDataChannel`).
+2. Enable `enableExecuteCommand: true` on the ECS service.
+3. Force-deploy + stop running task to spawn a replacement with the new property (the property is checked at task launch).
+4. From CloudShell: `aws ssm start-session --document-name AWS-StartPortForwardingSessionToRemoteHost` through the task → local port 15432 → `cl-stg-db.ccpw2uyocew0.us-east-1.rds.amazonaws.com:5432`.
+5. `psql -h localhost -p 15432 -U cladmin -d continueleads` ✓
+
+**Result**: all 5 migrations applied cleanly:
+
+- `0003_multi_tenancy.sql` (had one bug — see Issues below)
+- `0004_multi_tenancy_rls.sql`
+- `0005_multi_tenancy_backfill.sql`
+- `0006_api_usage.sql`
+- `0007_duplicate_content.sql`
+
+`schema_migrations` now has 7 rows. Tenant `internal` (UUID `00000000-0000-0000-0000-000000000001`, ACTIVE) seeded. RLS enabled on all expected tables. `pgvector 0.7.3` installed. Both DB roles created with correct `rolbypassrls` settings.
+
+### Task def revision + secrets wired (Phase E)
+
+Registered `cl-stg-admin:61` via `register-task-definition` with 5 new `secrets:` entries (Sentry × 3, Telegram × 2). Service updated to use rev 61. Rolled out cleanly.
+
+### Smoke tests + platform user (Phase F)
+
+- **Platform user seeded** via direct INSERT (instead of the seed CLI — cleaner from CloudShell). Used Python `bcrypt` for hashing through a heredoc to dodge bash `!` history-expansion on the password. Verified with `bcrypt.checkpw` → MATCH.
+- **/api/health** → `{status: "healthy", db: "ok", dbLatencyMs: 83}` ✓
+- **Telegram bot** → `{ok: true, message_id: 5}` + message arrived on phone ✓
+- **POST /api/platform-auth/login** → `HTTP/2 200` + `Set-Cookie: cl_session=…; Domain=.continueleads.com; Secure; HttpOnly; SameSite=strict; Expires=12h` + body `{ok: true, user: {…}}` ✓
+
+This single response validates end-to-end: bcryptjs in Node accepts Python's `$2b$12$` hash, `withPlatformContext` works, sessions table works, cookie config is correct, middleware passes through `isAlwaysPublic`, ALB routes by host, all 8 env vars loaded.
+
+### Issues surfaced (and fixed)
+
+**1. Malformed secret JSON.** When manually editing `cl-stg-app-secrets` in the Console "Plaintext" editor, missed the comma between `PII_ENCRYPTION_KEY` and the new `SENTRY_DSN` line. Console's "Errors: 0" validator was too lenient and accepted invalid JSON. Caused 48 task launch failures with `ResourceInitializationError: unable to retrieve secret from asm: invalid character '"' after object key:value pair`. Fixed via `sed` + `put-secret-value`. **Mitigation**: in future, validate secret JSON with `jq` BEFORE saving in Console.
+
+**2. Middleware bug — `apex/unknown` redirect runs before `isAlwaysPublic`.** When ALB health-checks the task on `/login` with `Host: <task-IP>`, `parseSubdomain` returns `type: 'unknown'` → middleware 307-redirects to `admin.continueleads.com/login`. ALB matcher was set to strict 200 → unhealthy → 48 failed launches stacked up. **Workaround applied**: widened ALB matcher to `200-307`. **Proper fix (deferred)**: move `isAlwaysPublic(pathname)` check above the `apex`/`unknown` redirects in `middleware.ts`. Task added.
+
+**3. `0003_multi_tenancy.sql` line 102 — partial index on `now()`.** PG rejects non-IMMUTABLE functions in index predicates. Fixed in [PR #15](https://github.com/davincidevllc/continue-leads/pull/15) (merged today): dropped the `WHERE expires_at > now()` clause; now a full index. CloudShell `/tmp` copy patched via `sed` for immediate re-apply.
+
+### Followups created
+
+- **Middleware fix** — move `isAlwaysPublic` above apex/unknown redirects. Once landed, ALB matcher can return to strict 200.
+- **APP_VERSION env var** — `/api/health` returns `version: "unknown"` because the task def has no `APP_VERSION`. CI should stamp it with git SHA on image build.
+- **MT-3b** — `tenant_id NOT NULL` flip. Still deferred until MT-8.
+- **Dual migration system consolidation** — still on the list.
+- **GitHub PAT cleanup** — Thiago to delete `cl-cloudshell-migrate` token at end-of-day.
+- **Password rotation** — `Filhodaputa12!!!` was used in chat; rotate to iCloud Keychain–only.
+
+### Where we are end-of-day
+
+- Burst 0a — secrets migration ✓ (done 2026-06-12)
+- Burst 0b.1 — multi-tenancy SQL ✓ (applied today)
+- Burst 0b.2 — auth + routing ✓ (deployed today; login works end-to-end)
+- Burst 0d — Telegram sender library shipped ✓ (verified live)
+- Burst 0e — Sentry + /api/health ✓ (health verified; Sentry awaits an actual error to fire)
+- Burst 0f — Cost-tracking schema + Claude wrapper ✓
+- DCD-1 — pgvector schema ✓
+
+**Next session: Burst 0b.3 — MT-8 (API route refactor) + MT-9 (tenant mgmt UI) + MT-10 (tenant user invitations).** This is the "stop using `cladmin` for app queries; switch to `app_tenant_user` / `app_platform_user` via withTenantContext/withPlatformContext" pass.
+
+---
+
+**Previous session: 2026-06-13 — Burst 0b.1 + 0b.2 + 0d (TG-2) + 0e (MON-1/2) + 0f (COST-1/2) + DCD-1 written. 8 PRs queued for in-person apply session.**
 
 What was completed:
 
-- **`gh` CLI installed** locally via official `.pkg` (v2.94.0, Apple Silicon Mac), `gh auth login` complete, token in macOS Keychain. All PRs in this session opened via `gh pr create` — no more browser compare-URL dance.
-- **Stale remote branches cleaned up** — only `origin/main` and the active feature branch remain. Most older branches had been auto-deleted on PR merge; `--prune` swept up local stale refs and `docs/platform-architecture-specs` got a final manual delete.
-- **PR #6 merged** — `docs: rename boston-co → localize`. Joe + Isis's company is named Localize. All 6 docs (CLAUDE.md + 5 spec files) updated: slug `boston-co` → `localize`, display name `Boston Co` → `Localize`, "(name TBD)" parentheticals updated.
-- **Burst 0b.1 SQL written and pushed (PR #7, branch `feat/burst-0b1-multi-tenancy`):**
-  - `packages/db/migrations/0003_multi_tenancy.sql` — MT-1 schema. 6 new tables (tenants, platform_users, tenant_users, sessions, tenant_audit_log, platform_audit_log) + nullable `tenant_id` column added to ~26 existing tenant-scoped tables across both migration systems. ~306 lines.
-  - `packages/db/migrations/0004_multi_tenancy_rls.sql` — MT-2 RLS. Creates `app_tenant_user` (RLS-subject) and `app_platform_user` (BYPASSRLS) DB roles + privileges + ALTER DEFAULT PRIVILEGES; enables RLS on 29 tables; writes per-table policies filtering by `current_setting('app.current_tenant_id', true)::uuid`. Sessions, platform_users, platform_audit_log deliberately exempt (reasoning in SQL comments).
-  - `packages/db/migrations/0005_multi_tenancy_backfill.sql` — MT-3a. Deletes the E2E test brand (`cl-e2e-painting-ma-20260503.com`), seeds the `internal` tenant with fixed UUID `00000000-0000-0000-0000-000000000001`, backfills `tenant_id` on every remaining row in 26 tables. Sanity-check DO block raises on unexpected state.
-- **Architectural decision documented:** all new migrations land in `packages/db/migrations/` (the canonical system). The legacy `/migrations/` directory is now tracked as a Known Issue for future consolidation.
-- **MT-3 split into MT-3a (this PR) + MT-3b (deferred):** the `NOT NULL` flip on `tenant_id` columns cannot ship until the API routes are refactored (Burst 0b.3 → MT-8) to provide `tenant_id` on every INSERT. MT-3b will land as `0006_multi_tenancy_not_null.sql` later.
+### Tooling & cleanup
+- **`gh` CLI installed** locally via official `.pkg` (v2.94.0, Apple Silicon Mac), `gh auth login` complete, token in macOS Keychain. All PRs in this session opened via `gh pr create`.
+- **Stale remote branches deleted** — only `origin/main` plus the three new active feature branches remain.
+- **PR #6 merged** — `docs: rename boston-co → localize`. All 6 docs (CLAUDE.md + 5 spec files) updated.
+
+### Burst 0b.1 — SQL written (PR #7, open)
+
+Branch `feat/burst-0b1-multi-tenancy`. Three migrations in `packages/db/migrations/`:
+
+- `0003_multi_tenancy.sql` — MT-1 schema (306 lines): 6 new tables (`tenants`, `platform_users`, `tenant_users`, `sessions`, `tenant_audit_log`, `platform_audit_log`) + nullable `tenant_id` column added to ~26 existing tenant-scoped tables across both migration systems (canonical + legacy).
+- `0004_multi_tenancy_rls.sql` — MT-2 RLS: creates `app_tenant_user` (RLS-subject) and `app_platform_user` (BYPASSRLS) DB roles + privileges; enables RLS on 29 tables; writes per-table policies filtering by `current_setting('app.current_tenant_id', true)::uuid`.
+- `0005_multi_tenancy_backfill.sql` — MT-3a backfill: deletes the E2E test brand, seeds the `internal` tenant with fixed UUID `00000000-0000-0000-0000-000000000001`, backfills `tenant_id` on every remaining row. Sanity DO block raises on unexpected state.
+
+### Burst 0b.2 code written (PR #8 + PR #9, open)
+
+- **PR #8** — Branch `feat/burst-0b2-mt4-db-context`. MT-4 db-context wrapper at `apps/admin/src/lib/db-context.ts` (177 lines). Exports `withTenantContext`, `withPlatformContext`, `resolveTenantBySlug`. Uses `SET LOCAL ROLE` + parameterized `set_config('app.current_tenant_id', $1, true)` for safe RLS scoping. UUID validation at the boundary.
+- **PR #9** — Branch `feat/burst-0b2-auth`. MT-5 (middleware), MT-6 (platform auth), MT-7 (tenant auth) — 9 files, +705/-18:
+  - `apps/admin/src/middleware.ts` rewritten: parses host, sets `x-cl-subdomain-type` / `x-cl-subdomain-slug` headers, handles apex/unknown/admin/tenant cases. Preserves legacy HMAC cookie path for backwards compat.
+  - `apps/admin/src/lib/session.ts` (new) — DB-backed session create/load/delete, cookie config (12h, HttpOnly, Secure in prod, SameSite=Strict, scoped to `.continueleads.com`). Random 32-byte tokens; SHA-256 hash stored in DB.
+  - `app/api/platform-auth/login/route.ts` + `logout/route.ts` — bcrypt verify against `platform_users`, session creation, anti-enumeration constant-time check.
+  - `app/api/tenant-auth/login/route.ts` + `logout/route.ts` — same shape, resolves slug → tenant → user, queries `tenant_users`.
+  - `packages/db/src/seed-platform-user.ts` — CLI script to create/rotate Thiago's first platform user, wired as `pnpm --filter @continue-leads/db seed:platform-user <email> <password> [name]`.
+  - `bcryptjs` added to both `apps/admin` and `packages/db` package.json. Pure JS, no native compile.
+
+### CLAUDE.md updates (this PR)
+
+- Architectural decisions added: canonical migration system, internal tenant seed UUID.
+- New Known Issue: dual migration systems (`packages/db/migrations/` + `/migrations/`) — both live on staging; new work goes in canonical, legacy directory marked for future consolidation.
+- This Last Session block.
 
 Architectural decisions surfaced this session:
 
 - **Canonical migration system** = `packages/db/migrations/` (added to Decisions Log).
-- **Internal tenant seed UUID** = `00000000-0000-0000-0000-000000000001` (added to Decisions Log; fixed for reproducibility).
-- **Dual-migration handling:** every new migration that touches existing legacy tables uses `EXISTS` guards so it works whether or not the legacy schema is present on a given DB (future-proofs against fresh-DB scenarios).
-- **MT-1/2/3 are safe to apply BEFORE the app code is refactored** because the running app connects as `cladmin` (RDS master, superuser, BYPASSes RLS by default). Enabling RLS in MT-2 has zero effect on current queries until MT-4 switches the app to the new roles.
+- **Internal tenant seed UUID** = `00000000-0000-0000-0000-000000000001` (Decisions Log).
+- **MT-3 split into MT-3a (data backfill, ships now) + MT-3b (NOT NULL flip, deferred).** NOT NULL cannot land until MT-8 refactors API routes to provide `tenant_id` on every INSERT. MT-3b is task #19.
+- **bcryptjs over native bcrypt** — pure JS, no native compile issues on ECS Fargate.
+- **Random opaque session tokens, not JWT** — database is the source of truth; deletion = instant revocation.
+- **Session cookie scoped to `.continueleads.com`** — one cookie persists across admin + tenant subdomains; the SESSION ROW maps to a specific user/tenant.
+- **Legacy HMAC auth preserved in middleware** until MT-8 refactors existing routes en masse. PR #9 is additive; nothing was deleted.
+
+### Burst 0e — Monitoring (PR #11)
+
+Branch `feat/burst-0e-monitoring`. 8 files, +245/-2:
+- **MON-1 Sentry SDK** — `@sentry/nextjs` integration with three runtime configs (`sentry.server.config.ts`, `sentry.client.config.ts`, `sentry.edge.config.ts`) plus `apps/admin/src/instrumentation.ts` hook. `next.config.js` conditionally wraps with `withSentryConfig` only when `SENTRY_DSN` is set, so this is safe to ship before signup.
+- **MON-2 Health endpoint** — `GET /api/health` returns `{status, version, region, db, dbLatencyMs, responseTimeMs, timestamp}` with a 1s DB-check timeout and proper Cache-Control. Auth bypass added to both legacy middleware AND PR #9's new middleware (small forward-compat commit pushed to PR #9 to avoid merge conflicts).
+
+### Burst 0f — Cost tracking (PR #12)
+
+Branch `feat/burst-0f-cost-tracking`. 5 files, +353:
+- **COST-1 `api_usage` table** — `packages/db/migrations/0006_api_usage.sql`. Tenant-scoped, RLS, 3 indexes (tenant×time for the dashboard, brand×time for attribution, provider×model×time for the platform-admin rollup). Tracks both successful and failed API calls.
+- **COST-2 Claude wrapper** — `apps/admin/src/lib/anthropic.ts` exports `generateMessage()` as the single entry point for Claude API calls. Auto-tracks usage to `api_usage` (best-effort, never breaks the call). Adds `@anthropic-ai/sdk` dep. Per-model pricing table in `anthropic-pricing.ts` flagged as "verify before use." Generic `recordApiUsage` helper in `api-usage.ts` will be reused for Voyage / Flux wrappers.
+
+### Burst 0d — Telegram sender (PR #13)
+
+Branch `feat/burst-0d-tg-sender`. Single file `apps/admin/src/lib/telegram.ts`, +300, no new deps (Node 20+ fetch):
+- **TG-2 sendAlert library** — `sendAlert({tenantId?, level, eventType, title, body?, metadata?})` is the single entry point. Resolves chat ID (per-tenant `tenants.settings.alerts.telegram_chat_id` OR platform `TELEGRAM_PLATFORM_CHAT_ID`). 13-event taxonomy. Per-event-type in-memory rate limiting (per ECS task). HTML message formatting with per-level emojis. **NEVER throws** — failure modes returned in result, never bubble up to caller. `sendTestAlert()` trip-wire helper for verifying wiring after deploy.
+
+### DCD-1 — Duplicate-content schema (PR #14)
+
+Branch `feat/burst-0p-dcd-schema`. Single migration `0007_duplicate_content.sql`, +137:
+- `CREATE EXTENSION vector` (pgvector ships with RDS PG 16)
+- `page_embeddings` — 1024-dim `vector` column matching Voyage `voyage-3-lite`, HNSW index for sub-50ms nearest-neighbor with cosine distance, `content_version` preserved per refresh cycle
+- `similarity_alerts` — flagged page-pairs with canonical pair ordering (`CHECK page_a_id < page_b_id`)
+- `similarity_trend_snapshots` — daily per-brand stats for the trend chart, idempotent per `UNIQUE(tenant_id, site_id, snapshot_date)`
+- All RLS-protected; unblocks DCD-2 (Voyage wrapper) and DCD-3+ later
 
 What's in progress:
 
-- **PR #7 open with all 3 migration files committed** (`feat/burst-0b1-multi-tenancy` branch, two commits: MT-1 + MT-2/3a). Title: "feat(db): Burst 0b.1 — multi-tenancy schema + RLS + backfill (MT-1, MT-2, MT-3a)". Tests pass conceptually; awaits real apply against staging RDS.
-- **CLAUDE.md updated** on the same branch with new Decisions Log entries (canonical migration system + internal tenant UUID), new Known Issue (dual migration systems), and this Last Session block.
+- **8 PRs open, all conceptually finished but awaiting in-person apply + verify:**
+  - **PR #7** — `feat/burst-0b1-multi-tenancy` — SQL migrations 0003/0004/0005 (Burst 0b.1)
+  - **PR #8** — `feat/burst-0b2-mt4-db-context` — `db-context.ts` (MT-4)
+  - **PR #9** — `feat/burst-0b2-auth` — middleware + auth routes + seed script (MT-5/6/7)
+  - **PR #11** — `feat/burst-0e-monitoring` — Sentry SDK + `/api/health` (MON-1/2)
+  - **PR #12** — `feat/burst-0f-cost-tracking` — `api_usage` table + Claude wrapper (COST-1/2)
+  - **PR #13** — `feat/burst-0d-tg-sender` — Telegram sender library (TG-2)
+  - **PR #14** — `feat/burst-0p-dcd-schema` — pgvector + duplicate-content schema (DCD-1)
+- **This CLAUDE.md closeout PR (#10)** — branch `docs/burst-0b1-0b2-session-closeout`.
 
-Next task (when Thiago is back at his computer):
+**Total session output: ~3,500 lines across 8 PRs.**
 
-- **Apply the three migrations to staging RDS.** Two viable paths:
-  1. From his Mac: `pnpm install`, `pnpm --filter @continue-leads/db build`, then `DB_HOST=…  DB_PASSWORD=$(aws secretsmanager …) pnpm db:migrate:staging`. Requires AWS CLI + RDS port 5432 reachable from his IP — unconfirmed whether either is true.
-  2. From AWS CloudShell: `git clone`, fetch password from Secrets Manager, `psql -f packages/db/migrations/0003_…sql` (and 0004, 0005). Requires CloudShell to reach RDS in private subnet — unconfirmed.
-  3. Fallback: ECS Exec into the running task. Always works since the task already has DB connectivity.
-- After apply: verify with `\d+ sites` shows `tenant_id` column + `sites_tenant_isolation` policy; `SELECT slug FROM tenants;` returns `internal`; `SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 3;` returns the three new versions.
-- Then merge PR #7 to main.
-- **Then start Burst 0b.2 — auth + routing** (MT-4 db-context wrapper, MT-5 subdomain routing middleware, MT-6 platform auth, MT-7 tenant auth). ~4 hours.
+### Apply order (next session, in-person)
+
+Strictly in this order — multi-tenancy migrations MUST apply before everything else because every later migration / code path depends on the `tenants` table + RLS roles:
+
+1. **Pull main and check out PR #7's branch** for the apply: `git fetch && git checkout feat/burst-0b1-multi-tenancy`.
+2. **Apply 0003/0004/0005 to staging RDS** via `pnpm db:migrate:staging` (or psql / CloudShell fallbacks).
+3. **Verify**: `\d+ sites` shows `tenant_id` + RLS policy; `SELECT slug FROM tenants;` returns `internal`; `schema_migrations` has the three new versions; test brand deleted.
+4. **Confirm existing app still works** (legacy HMAC path preserved — no observable change yet).
+5. **Merge PR #7.**
+6. **Merge PR #8** (MT-4 db-context).
+7. **Merge PR #9** (Burst 0b.2 auth + routing) — `pnpm install` for bcryptjs before deploy.
+8. **Seed Thiago's platform user:** `pnpm --filter @continue-leads/db seed:platform-user thiago@continueleads.com '<strong password>' 'Thiago DeSouza'`. Store password in iCloud Keychain (`CL — Platform Login`).
+9. **Deploy** — push to main triggers CI → ECS.
+10. **Smoke test platform login** at `https://admin.continueleads.com/api/platform-auth/login` — verify cookie + session row.
+11. **Checkout PR #11's branch, apply nothing (code-only)**, merge. `pnpm install` for `@sentry/nextjs`. Deploy.
+12. **Smoke test `/api/health`** — returns 200 with `db: 'ok'` (works immediately; bypasses auth).
+13. **Sign up at sentry.io** (free tier), get DSN, add to `cl-stg-app-secrets`: `SENTRY_DSN`, `NEXT_PUBLIC_SENTRY_DSN`, `SENTRY_ENVIRONMENT=staging`. Update ECS task def. Force-redeploy. Verify with intentional throw.
+14. **Apply 0006_api_usage.sql** (PR #12). Merge PR #12. `pnpm install` for `@anthropic-ai/sdk`. Verify `\d+ api_usage` shows the columns + RLS policy.
+15. **Talk to @BotFather**, create the Continue Leads bot, copy token. Send any message from your personal Telegram, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` for your chat ID. Add `TELEGRAM_BOT_TOKEN` + `TELEGRAM_PLATFORM_CHAT_ID` to `cl-stg-app-secrets`. Merge PR #13. Verify by calling `sendTestAlert()`.
+16. **Apply 0007_duplicate_content.sql** (PR #14) — verify `\dx vector` shows the extension. Merge PR #14.
+17. **Update ALB target group health check path** from `/` to `/api/health` (AWS Console).
+18. **Merge PR #10 (this closeout).**
+
+Once all 8 PRs are merged + applied:
+- **All of Burst 0b is live** (multi-tenancy enforced via RLS, new auth path working).
+- **Burst 0d/0e/0f foundations are live** — Telegram channel works, Sentry catches errors, cost tracking ready for Phase 3, duplicate detection schema ready for Phase 4.
+
+Then start **Burst 0b.3** (MT-8 API route refactor, MT-9 tenant management UI, MT-10 tenant user invitation).
+
+### What's NOT applied yet
+
+- Wildcard ACM cert `*.continueleads.com` (needed before tenant subdomains actually resolve) — defer to before Burst 0b.3 demo.
+- `tenant_id` `NOT NULL` flip — task #19, after MT-8.
+- Legacy HMAC auth removal — also after MT-8.
+- Dual-migration system consolidation — Known Issue for later.
 
 Open questions / blockers (carried over):
 
