@@ -11,15 +11,18 @@
     "test": "vitest run",
     "lint": "tsc --noEmit",
     "migrate": "node dist/migrate.js",
-    "seed": "node dist/seed.js"
+    "seed": "node dist/seed.js",
+    "seed:platform-user": "node dist/seed-platform-user.js"
   },
   "dependencies": {
     "@continue-leads/shared": "workspace:*",
-    "pg": "^8.13.0"
+    "pg": "^8.13.0",
+    "bcryptjs": "^2.4.3"
   },
   "devDependencies": {
     "@types/node": "^25.2.3",
     "@types/pg": "^8.11.0",
+    "@types/bcryptjs": "^2.4.6",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }
